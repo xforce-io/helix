@@ -21,6 +21,11 @@ import {
 import { runHarness } from './harness.js'
 import { LiveCellExecutor } from './live-executor.js'
 import type { CellExecutionRecord, LiveEvidence, ObjectRef } from './types.js'
+import {
+  decideOutcome,
+  episodeContinuityCheck,
+  traceChecksBeforeOutcome,
+} from './verification.js'
 
 function allObjectRefs(records: CellExecutionRecord[]): ObjectRef[] {
   return records.flatMap(record => record.managedObjects)
@@ -28,10 +33,6 @@ function allObjectRefs(records: CellExecutionRecord[]): ObjectRef[] {
 
 async function refsExist(store: ITraceObjectStore, refs: ObjectRef[]): Promise<boolean> {
   return (await Promise.all(refs.map(ref => store.has(ref.hash)))).every(Boolean)
-}
-
-function count(events: Event[], type: Event['type']): number {
-  return events.filter(event => event.type === type).length
 }
 
 async function main(): Promise<void> {
@@ -146,13 +147,22 @@ async function main(): Promise<void> {
       passed: executor.kernelStartCount === 1 && executor.bridgeStartCount === 1,
       detail: `kernel=${executor.kernelStartCount} bridge=${executor.bridgeStartCount}`,
     },
+    episodeContinuityCheck(projection.cells),
   ]
-  const livePassed = baseChecks.every(check => check.passed)
+  const eventsBeforeOutcome = (await traceStore.readByRunId(runId)) as Event[]
+  const preOutcomeTraceChecks = traceChecksBeforeOutcome(
+    eventsBeforeOutcome,
+    projection.modelCallCount,
+    projection.cells.length,
+  )
+  const preOutcomeChecks = [...baseChecks, ...preOutcomeTraceChecks]
+  const outcomeValue = decideOutcome(preOutcomeChecks, harnessResult.uncertain)
+  const finalObservationHash = projection.lastObservationRef?.hash ?? 'none'
   const outcome = await milkie.recordTaskOutcome({
     runId,
-    value: livePassed ? 'success' : 'failure',
+    value: outcomeValue,
     source: 'eval:fle',
-    note: 'Deterministic Helix Factorio live verifier',
+    note: `Deterministic Helix Factorio live verifier; finalObservationRef=${finalObservationHash}`,
     scores: [
       { name: 'modelCalls', value: projection.modelCallCount },
       { name: 'cells', value: projection.cells.length },
@@ -161,21 +171,19 @@ async function main(): Promise<void> {
   })
   const events = (await traceStore.readByRunId(runId)) as Event[]
   const traceCheck = {
-    id: 'S1.milkie-trace',
-    passed:
-      count(events, 'llm.requested') === projection.modelCallCount &&
-      count(events, 'llm.responded') === projection.modelCallCount &&
-      count(events, 'tool.requested') === projection.cells.length &&
-      count(events, 'tool.responded') === projection.cells.length &&
-      count(events, 'task.outcome.recorded') === 1,
+    id: 'S1.milkie-outcome-event',
+    passed: events.filter(event => event.type === 'task.outcome.recorded').length === 1,
     detail: `${events.length} events`,
   }
   const outcomeCheck = {
     id: 'S1.milkie-outcome',
-    passed: outcome.value === 'success' && outcome.source === 'eval:fle',
+    passed:
+      outcome.value === outcomeValue &&
+      outcome.source === 'eval:fle' &&
+      (outcome.value !== 'success' || outcome.note?.includes(finalObservationHash) === true),
     detail: `${outcome.value}/${outcome.source}`,
   }
-  const checks = [...baseChecks, traceCheck, outcomeCheck]
+  const checks = [...preOutcomeChecks, traceCheck, outcomeCheck]
   const evidenceCore: LiveEvidence = {
     schema: 'helix.factorio.live/v1',
     verdict: checks.every(check => check.passed) ? 'pass' : 'fail',
@@ -190,7 +198,22 @@ async function main(): Promise<void> {
   }
   const evidence = await attachEvidenceRef(objects, evidenceCore)
   const output = await writeEvidence(runId, 'live', evidence, argument('--evidence'))
-  console.log(JSON.stringify(evidence, null, 2))
+  console.log(
+    JSON.stringify(
+      {
+        schema: evidence.schema,
+        verdict: evidence.verdict,
+        runId: evidence.runId,
+        pins: evidence.pins,
+        projectionDigest: evidence.projectionDigest,
+        outcome: evidence.outcome,
+        checks: evidence.checks,
+        evidenceRef: evidence.evidenceRef,
+      },
+      null,
+      2,
+    ),
+  )
   console.log(`runId=${runId}`)
   console.log(`evidence=${output}`)
   process.exitCode = evidence.verdict === 'pass' ? 0 : 1

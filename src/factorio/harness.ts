@@ -10,7 +10,7 @@ import type {
 import type { ExecuteCellInput } from './live-executor.js'
 
 export const EXECUTE_CELL_TOOL = 'execute_cell'
-export const MAX_CELLS = 12
+export const MAX_CELLS = 16
 export const MAX_MODEL_CALLS = 16
 
 const SYSTEM_PROMPT = `You are the model that owns a persistent IPython execution session.
@@ -42,6 +42,7 @@ export interface HarnessResult {
   modelResponses: ModelResponse[]
   modelOwned: boolean
   feedbackLinked: boolean
+  uncertain: boolean
 }
 
 function initialProjection(runId: string, episodeId: string): EpisodeProjection {
@@ -74,6 +75,7 @@ function foldRecord(
       ? {
           lastObservationRef: effect.observationRef,
           lastStateRef: effect.outputStateRef,
+          actionCapabilities: effect.actionCapabilities,
           verification: effect.verification,
           terminated: effect.terminated,
           truncated: effect.truncated,
@@ -106,6 +108,7 @@ function contextEnvelope(projection: EpisodeProjection, pins: RunPins): Record<s
         maxOneEnvironmentEffect: true,
       },
       bindings: ['helix', 'factorio'],
+      factorioActionCalls: projection.actionCapabilities ?? [],
     },
     episode: {
       resetCount: projection.resetCount,
@@ -262,6 +265,7 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
   const modelResponses: ModelResponse[] = []
   let feedbackLinked = true
   let modelOwned = true
+  let uncertain = false
 
   for (let modelOrdinal = 0; modelOrdinal < MAX_MODEL_CALLS; modelOrdinal += 1) {
     const envelope = contextEnvelope(projection, options.pins)
@@ -349,6 +353,7 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
       record.cellId === cellInput.cellId &&
       record.sourceDigest === digest(authored.code)
     projection = foldRecord(projection, record)
+    uncertain = uncertain || record.error?.stateCertainty === 'uncertain'
     priorExchange = [
       { role: 'assistant', content: response.content },
       {
@@ -367,9 +372,16 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
     if (`${record.error?.code ?? ''} ${record.error?.message ?? ''}`.includes('POLICY_VIOLATION')) {
       break
     }
+    if (record.error?.stateCertainty === 'uncertain') break
+    if (
+      record.error?.code === 'KERNEL_TIMEOUT' ||
+      record.error?.code === 'KERNEL_RESOURCE_EXHAUSTED'
+    ) {
+      break
+    }
     if (verificationFrom(projection).success) break
     if (projection.cells.length >= MAX_CELLS) break
   }
 
-  return { projection, modelResponses, modelOwned, feedbackLinked }
+  return { projection, modelResponses, modelOwned, feedbackLinked, uncertain }
 }

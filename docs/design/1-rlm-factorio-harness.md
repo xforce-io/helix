@@ -11,7 +11,7 @@ Issue #1 要求 Helix 在真实 Factorio Learning Environment（FLE）中完成�
 ## 2. 名词解释
 
 - **RLM Harness**：Helix 中驱动模型与持久 IPython Kernel 交替运行的协调层；模型决定下一段程序，Harness 执行硬边界。
-- **Kernel**：隔离运行的持久 IPython 进程。模型提交 cell，但不能直接访问宿主网络、凭证或进程控制。
+- **Kernel**：独立运行的持久 IPython 进程。模型提交 cell；本地 profile 通过 AST capability policy、环境 allowlist、wall timeout、CPU/RSS 预算约束能力，但不冒充容器级 OS 隔离。
 - **Binding**：预加载到 Kernel 的窄能力对象。本设计中的 `factorio` binding 只暴露受控的 reset、step 和只读状态。
 - **Broker**：Helix 宿主进程内的能力代理，校验 Kernel 请求，并把一次 cell 产生的环境事实归入该 cell 的执行记录。
 - **Bridge**：运行在 Kernel 沙箱之外、持有 FLE Python 依赖并连接 FLE cluster 的 example 进程。
@@ -90,7 +90,7 @@ reward、production score、automated production score、steps 和 ticks 只进�
 
 首个本地 example 使用独立、长生命周期的 IPython worker 进程和独立 FLE Bridge 进程。Kernel 进程不安装或 import FLE，不接收 Provider 凭证，环境变量使用 allowlist；它只能通过版本化 stdio capability protocol 请求 Broker。Broker 对外层 cell 与内层 FLE action 分别执行 AST allowlist，拒绝 import、文件、进程、网络、反射、私有属性、动态执行与 raw RCON。Bridge 才持有 FLE 连接。
 
-这是适合本地验收的 capability sandbox，不冒充生产级 OS/多租户隔离。容器级无网络、只读根文件系统、seccomp 与资源 cgroup 属于后续托管部署加固；本 Issue 的证据必须如实标注 `isolationProfile=local-process-ast/v1`，不得写成已验证的生产沙箱。
+这是适合本地验收的 capability sandbox，不冒充生产级 OS/多租户隔离。v2 额外封锁 IPython/dynamic-builtins 绕过、未登记 callable，并由父进程执行 wall/RSS watchdog；容器级无网络、只读根文件系统、seccomp 与资源 cgroup 仍属于后续托管部署加固。证据必须如实标注 `isolationProfile=local-process-ast/v2`。
 
 ### 5.6 内部事实与模型渲染分离
 
@@ -110,8 +110,8 @@ flowchart TB
     IO --> M["External Model Provider"]
     H -->|"invokeTool: helix.kernel.execute_cell"| IO
     IO -->|"live handler only"| K["Sandboxed IPython Kernel"]
-    K -->|"Unix capability socket"| B["Helix Broker"]
-    B -->|"FLE protocol v1"| F["Factorio example Bridge"]
+    K -->|"versioned stdio capability"| B["Helix Broker"]
+    B -->|"FLE protocol v2"| F["Factorio example Bridge"]
     F --> C["FLE cluster"]
     B --> O["milkie Trace Object Store"]
     IO --> T["milkie Trace / Replay / Outcome"]
@@ -153,7 +153,7 @@ sequenceDiagram
     opt one factorio reset/step
         K->>B: binding request(commandId, priorStateRef, program)
         B->>B: admission + stale-state check
-        B->>F: protocol v1 command
+        B->>F: protocol v2 command
         F->>F: restore state and execute FLE action
         F-->>B: observation, output state, verifier
         B->>O: putCanonical(full objects)
@@ -186,8 +186,8 @@ Bridge 对每个 `commandId` 保存进程内 command ledger，并且同一 episo
 2. 若调用前校验失败，返回确定未执行的错误，可由模型修正后使用新 step；
 3. 若 action 返回 FLE 业务错误且 output GameState 可确认，记录该 Observation/State，允许模型继续；
 4. 若超过 120 秒、连接中断或 Bridge 崩溃且无法证明未执行，标记 `FLE_TIMEOUT_UNCERTAIN`，禁止对原环境盲重试；
-5. Broker 可对仍存活的 Bridge 查询同一 `commandId`；若 ledger 已有完整结果则完成原 cell；
-6. Bridge 不可达、ledger 无结论或最后确认 State Ref 不存在时，销毁不确定环境并结束 Run，Outcome 为 `unknown`。
+5. v2 watchdog 超时后终止对应 worker；若 ledger 无完整响应，不自动重启或重发原 command；
+6. Bridge 不可达、ledger 无结论或最后确认 State Ref 不存在时，结束 Run，Outcome 为 `unknown`。
 
 首版不从不确定动作后自动恢复并继续，也不把新 command 伪装成原 step 的幂等重试。最后确认 State Ref 仅作为诊断和未来显式恢复设计的输入。
 
@@ -198,7 +198,7 @@ Bridge 对每个 `commandId` 保存进程内 command ledger，并且同一 episo
 | RLM Harness | 模型/Kernel 交替循环、预算检查、停止判定、纯投影折叠 | Provider 网络、Trace 存储、FLE 实现 |
 | Context Projector / Renderer | 生成 canonical envelope；渲染 Markdown + JSON 模型输入 | 决定权限、修改事实、保存另一份状态 |
 | Kernel Runtime | 创建/销毁隔离 IPython、维护 namespace revision、执行一个 cell | 直接连接 FLE、持久化事实、决定任务成功 |
-| Kernel Bindings | 向模型暴露窄能力与对象读取；把请求送到 Broker | 持有凭证、绕过 Broker、定义 Replay |
+| Kernel Bindings | 向模型暴露窄 Factorio 能力与 bootstrap metadata；把请求送到 Broker | 持有凭证、绕过 Broker、定义 Replay |
 | milkie Adapter | 把模型调用和 `execute_cell` 映射到 IOPort；记录 Outcome | 重做 milkie lifecycle/Trace/Replay |
 | Factorio Broker | 校验 action/state/次序、管理一次在途、对象化大结果 | 解释任务目标、提供 raw RCON |
 | Factorio Bridge | 适配 FLE reset/step、GameState 导入导出、command ledger | 成为 Helix 通用环境接口 |
@@ -208,18 +208,9 @@ Bridge 对每个 `commandId` 保存进程内 command ledger，并且同一 episo
 
 ### 7.1 Bootstrap 与能力发现
 
-Kernel Runtime 在首个 cell 前安装保留名称 `helix`，example 另外注册 `factorio`。`helix` 是受保护的能力代理，不是权限事实源；其中 metadata 投影只读，显式方法仍可按 capability 产生受控 effect。它至少提供：
+Kernel Runtime 在每个 cell 前重装保留名称 `helix`，example 另外注册 `factorio`。v2 的 `helix` 是只读 bootstrap namespace，提供 `helix.task` 与 `helix.runtime`；完整模型可见能力清单只认每轮 canonical `ContextEnvelope.capabilities`，其中持续保留最近确认的 `factorioActionCalls`，即使上一 cell 在 Bridge admission 阶段失败也不丢失。Provider 的 system/developer messages 不自动复制成 Python 变量；宿主执行策略内部信息、Provider 凭证、认证头和宿主路径不进入 `helix`。
 
-- `helix.task`：用户可见任务说明、验收条件和 task ref；
-- `helix.runtime`：`runId`、固定版本、Kernel revision 和可见预算；
-- `helix.capabilities.list()` / `describe(name)`：名称、签名、effect class、返回 schema 和硬限制；
-- `helix.state`：当前 episode、最后确认 Observation/State refs 和 verifier 投影；
-- `helix.objects.describe(ref)` / `read(ref, range)` / `put(value)`：受管对象的查看、分段读取和显式外置；
-- `helix.help(name?)`：适合模型阅读的简明说明。
-
-模型首次收到的 capability manifest 与 `helix.capabilities` 来自同一个 canonical 投影，禁止维护两份手写描述。模型可在 Python namespace 中执行 `helix = None`，但这只覆盖本地名称：Kernel Runtime 在每个 cell admission 前重新安装保留 binding，Broker 仍根据宿主 capability token 和 policy 判权。Provider 的 system/developer messages 不自动复制成 Python 变量；宿主执行策略内部信息、Provider 凭证、认证头、宿主路径和 Broker capability token 永不进入 `helix`。
-
-从模型交互视角，首版只有一个顶层执行入口：提交下一段 cell；从 milkie I/O 视角，对应唯一 tool effect `helix.kernel.execute_cell`。`factorio.reset/step/status` 和对象读取是 Kernel binding，而不是向模型并列展示的一组外层 tools。
+从模型交互视角，当前只有一个顶层执行入口：提交下一段 cell；从 milkie I/O 视角，对应唯一 tool effect `helix.kernel.execute_cell`。`factorio.reset/step/status` 是 Kernel binding，而不是向模型并列展示的一组外层 tools。通用 `helix.objects`、capability RPC 和跨任务 bootstrap API 不属于本纵切，出现第二个需求后另立设计。
 
 ### 7.2 ContextEnvelope 与模型渲染
 
@@ -283,7 +274,6 @@ LLM 看见的是有界决策投影，不是完整 Trace。完整 GameState、全
 
 `helix.kernel.execute_cell` 的输入至少包含：
 
-- `cellId`、cell source 与 source digest；
 - 期望的 Kernel namespace revision；
 - 期望的 episode revision/最后确认 State Ref；
 - 当前预算上限与固定版本摘要。
@@ -291,9 +281,9 @@ LLM 看见的是有界决策投影，不是完整 Trace。完整 GameState、全
 返回的 `CellExecutionRecord` 至少包含：
 
 - `cellId`、输入 digest、开始/结束的 namespace revision；
-- stdout、stderr、display result 的有界预览及完整 Content Ref；
+- stdout、stderr、display result 的有界预览；
 - 可稳定序列化的 namespace 摘要与 revision；
-- 本 cell 创建的受管对象引用列表及 producer metadata；
+- 本 cell 创建的 action、Observation 与 State 受管对象引用列表；
 - 结构化错误或成功状态；
 - 可选且至多一个 `factorioEffect`：`episodeId`、`stepIndex`、`commandId`、method、program ref、input State Ref、Observation Ref、output State Ref、reward、terminated、truncated、task verification 与 error classification。
 
@@ -303,23 +293,23 @@ Harness 只根据该记录折叠可回放投影。IPython namespace 由 live Ker
 
 普通 Python 值默认只具有当前 live Kernel/Run 生命周期，不自动进入 Trace object store。它可在 namespace 中跨 cell 使用，但受 Kernel 硬内存预算约束，也不承诺在 Kernel 崩溃后恢复。Helix 不在 cell 后扫描或自动 pickle 任意 namespace：对象可能不可序列化、序列化可能执行代码，也可能瞬时复制大内存。
 
-所有 Helix binding 的大结果必须先外置，再向 Kernel 返回轻量、带类型的 Result object。例如 `FactorioStepResult` 持有 Observation/State `ObjectRef`、verifier、指标和 step metadata，而不是完整 GameState。模型创建的受支持普通值可显式调用 `helix.objects.put(value)` 外置；不支持类型返回可判定错误，不退回不受控 pickle。
+所有 Factorio binding 的大结果先外置，再向 Kernel 返回轻量、带类型的 `EffectResult`，其中持有 Observation/State `ObjectRef`、有界预览、verifier 和指标，而不是完整 GameState。v2 不提供普通 Python 值的通用外置 API，也不退回不受控 pickle；这一取舍保持纵切最小，并由 Kernel RSS/CPU/wall 预算约束普通值生命周期。
 
-内容引用使用 milkie `ITraceObjectStore.putCanonical` 产生的 sha256 标识，至少携带 `hash`、`kind`、`schema`、`mediaType`、字节数、producer run/cell/effect、可选 preview 和 `truncated`。该 metadata 同时出现在 Python Result object、`CellExecutionRecord` 和下一轮 envelope 的有界投影中；完整 provenance 只认 milkie Trace。完整 Observation 使用 canonical JSON；GameState 使用 FLE `GameState.to_raw()` 的 JSON 表示；action program 使用 UTF-8 文本。
+内容引用使用 milkie `ITraceObjectStore.putCanonical` 产生的 sha256 标识，携带 `hash`、`kind`、`schema`、`mediaType`、字节数、可选 preview 和 `truncated`。该 metadata 同时出现在 Python Result object、`CellExecutionRecord` 和下一轮 envelope 的有界投影中；producer 与因果 provenance 只认 milkie Trace。完整 Observation 使用 canonical JSON；GameState 使用 FLE `GameState.to_raw()` 的 JSON 表示；action program 使用 UTF-8 文本。
 
-preview 最大 8 KiB。IPython display hook 对支持类型生成有界摘要；超过阈值的可序列化 display artifact 写入 object store 并返回 ref，但不静默替换原 Python 变量。stdout/stderr 必须流式计数：模型最多看到 8 KiB preview，完整流仅在输出预算内进入 object store；达到预算立即停止捕获并返回 `OUTPUT_LIMIT_EXCEEDED`，禁止先聚合完整输出再截断。无法安全摘要的对象只返回类型、shape/length 和截断标记。
+Observation/ObjectRef preview 的 canonical JSON 最大 8 KiB。stdout/stderr 使用有界写入 sink，最多保留 8 KiB 前缀，不先聚合完整输出；达到预算返回 `OUTPUT_LIMIT_EXCEEDED`。v2 不承诺保存完整 stdout/stderr/display artifact，也不扫描普通 namespace。
 
 ### 7.5 Kernel 与 Bridge 协议
 
-Kernel worker 使用版本化消息协议接收 execute-cell 请求，stdout 只传协议帧，诊断写 stderr。Kernel 内 `factorio` binding 通过唯一挂载的 Unix capability socket 请求 Broker；Kernel 容器没有网络接口、宿主凭证、Docker socket或任意宿主目录挂载。
+Kernel worker 使用 protocol v2 的 stdio 消息接收 execute-cell 请求，stdout 只传协议帧，诊断写 stderr。Kernel 内 `factorio` binding 只能通过该通道请求 Broker。local-process profile 不接收 Provider 凭证或 Docker socket，并由 AST policy 阻断文件、进程、网络与 IPython shell 入口；它不是“无宿主目录/无网络接口”的容器。
 
-Bridge protocol v1 是 example 内部、单请求单响应的版本化协议。请求包含 `protocolVersion`、`commandId`、`method` 和 params；响应为成功 result，或含 `code`、`retryable`、`stateCertainty` 的结构化错误。允许的方法只有 `reset`、`step`、`status`、`close`。Bridge 以无 shell 的参数数组启动，环境变量采用 allowlist，协议输出与日志分流。
+Bridge protocol v2 是 example 内部、单请求单响应的版本化协议。请求包含 `protocolVersion`、`commandId`、`method` 和 params；响应为成功 result，或含 `code`、`stateCertainty` 的结构化错误。允许的方法只有 `reset`、`step`、`close`；进程内 command ledger 对已完成的相同 `commandId` 返回同一响应。Bridge 以无 shell 的参数数组启动，环境变量采用 allowlist，协议输出与日志分流。
 
 ### 7.6 Action program policy
 
 Broker/Bridge 在进入 FLE 前解析 Python AST：允许控制流、局部变量、字面量、容器和显式登记的 FLE public functions；拒绝 `import`、动态代码执行、文件/进程/网络 API、反射式全局访问、私有属性、raw RCON 与未登记 callable。长度超过 10,000 字符、AST 无法解析或使用禁止能力时，不执行 FLE。
 
-该策略是能力边界，不依赖关键词过滤；但它仍与容器/网络隔离共同生效，不能单独作为生产级安全沙箱证明。
+该策略是 local profile 的能力边界，不依赖关键词过滤；生产部署仍需叠加容器与网络隔离，不能把 AST policy 单独作为多租户安全证明。
 
 ## 8. API / CLI 设计
 
@@ -355,16 +345,7 @@ npm run verify:factorio:replay -- --run <run-id> --evidence <path>
 
 `reset` 与 `step` 在同一个 cell 中不能同时调用；第二个 effectful 调用立即以 `MULTIPLE_EFFECTS_IN_CELL` 拒绝，且不接触 FLE。
 
-模型可见的通用 Bootstrap 语义为：
-
-- `helix.help(name?)`：返回当前版本下的简明用法；
-- `helix.capabilities.list()` / `describe(name)`：发现能力及其 effect/limit/result schema；
-- `helix.objects.describe(ref)`：只读返回对象 metadata；
-- `helix.objects.read(ref, offset?, limit?)`：有界读取支持分段访问的对象；
-- `helix.objects.put(value)`：仅对登记的安全 codec 外置普通 Python 值，返回 `ObjectRef`；
-- `helix.state.current`：只读当前可回放投影。
-
-这些名称是 L2 中待实现验证的首版内部契约，不作为 npm 顶层公共导出。所有返回 schema 都带版本；未知字段允许忽略，未知 schema major 必须拒绝。
+模型可见的通用 Bootstrap 仅包含 `helix.task` 与 `helix.runtime` metadata；能力发现通过每轮 `ContextEnvelope.capabilities` 完成。它们均为 example 内部版本化结构，不作为 npm 顶层公共导出。
 
 ## 9. 边界考虑
 
@@ -382,7 +363,6 @@ npm run verify:factorio:replay -- --run <run-id> --evidence <path>
 - `FLE_TIMEOUT_UNCERTAIN`：无法确认 action 是否生效，禁止盲重试；
 - `BRIDGE_PROTOCOL_ERROR`：帧、版本或响应不合法；按 state certainty 决定恢复或终止；
 - `OBJECT_MISSING`：Trace 对象不可读取，Replay/恢复失败；
-- `OBJECT_CODEC_UNSUPPORTED`：普通 Python 值没有登记的安全外置 codec，值仍留在 Kernel；
 - `OUTPUT_LIMIT_EXCEEDED`：display/stdout/stderr 超过输出预算，停止继续捕获并保留已有 ref/preview；
 - `KERNEL_RESOURCE_EXHAUSTED`：Kernel 内存、CPU 或进程资源硬预算耗尽，当前 Run 不承诺恢复 namespace；
 - `BUDGET_EXHAUSTED`：模型、cell、trajectory 或 wall-clock 硬预算耗尽。
@@ -396,8 +376,8 @@ npm run verify:factorio:replay -- --run <run-id> --evidence <path>
 ### 9.3 权限与安全
 
 - Model Provider 凭证只由 milkie/provider adapter 持有；
-- Kernel 无网络、无宿主进程控制、无凭证、无 Docker socket；
-- Bridge 网络只达 FLE cluster，拒绝任意目标和 raw RCON 方法；
+- Kernel 不接收凭证或 Docker socket；local-process AST policy 阻断模型代码的网络、文件、宿主进程和 IPython shell 入口，生产部署仍需 OS 级网络/文件隔离；
+- Bridge 只向固定 FLE cluster 发起应用层连接，action policy 拒绝任意网络目标和 raw RCON 方法；生产部署仍需网络策略做纵深防御；
 - Trace 与 CLI 对密钥、认证头和宿主路径做结构化脱敏；action/Observation/GameState 不是秘密，但按对象存储策略控制访问；
 - example 不下载、打包或分发 Factorio 二进制、存档、许可证或用户凭证；
 - 恶意 FLE/Provider 与宿主 Docker daemon 被视为信任边界之外，首版不对其失陷负责。
@@ -422,7 +402,7 @@ npm run verify:factorio:replay -- --run <run-id> --evidence <path>
 
 当前 Helix 没有已发布公共运行时 API 或存量 Trace，因此不需要数据迁移。设计采用新增且可移除的 Factorio example：未安装 Python/FLE 时，核心 TypeScript build/test 保持通过；回滚可移除 example、binding registration 和启动脚本，不改变 milkie 数据模型。
 
-首版复用 milkie 现有 model/tool IOPort、Trace object store 与 Task Outcome，不新增 EventKind，也不复制 Replay 日志。`CellExecutionRecord` 作为 `helix.kernel.execute_cell` 的版本化 tool output 被 milkie 记录；不兼容变化必须提升 Kernel protocol/binding set 版本，并拒绝用错误版本 live-resume 或 replay。旧 Trace 继续按其固定版本读取，不做静默升级。
+首版复用 milkie 现有 model/tool IOPort、Trace object store 与 Task Outcome，不新增 EventKind，也不复制 Replay 日志。`CellExecutionRecord` 作为 `helix.kernel.execute_cell` 的版本化 tool output 被 milkie 记录；不兼容变化提升 Kernel protocol/binding set 版本，并拒绝用错误版本 live-resume 或 replay。当前 runner 只执行 v2；v1 Trace 保持不可变，但需在其记录的旧代码版本上 replay，不做静默升级或用 v2 重新解释。
 
 FLE adapter 必须固定到通过验收的不可变 tag/commit 与 task definition digest。升级 FLE 时使用新的 adapter version 运行完整 E2E；失败可回退旧版本和旧镜像，不改写已有对象或 Outcome。
 
@@ -522,11 +502,11 @@ Replay 进程必须在 Kernel 和 FLE 均不可启动/不可连接的环境执�
 - **Integration**：用固定 Bridge 验证 reset→多 step→verifier 的对象化链；相同 command 返回同一结果且不重复执行；stale state 被拒绝；120 秒超时进入 uncertain、未盲重试且 Run 以 unknown 中止；verifier/reward 到 Outcome/scores 映射正确。
 - **Integration**：录制含 Factorio effect 的 `execute_cell` 后 Replay，验证只有外层 tool 记录、handler 未执行、纯投影仍得到相同 episode revision，并且不存在欠消费记录。
 - **Integration**：首次和后续模型调用分别生成完整 bootstrap 与增量 envelope；验证 capability manifest 与 Kernel `helix.capabilities` 同源，实际 Provider request、envelope digest 和 `markdown-json/v1` renderer version 被记录；Replay 不重新渲染旧请求。
-- **Integration**：binding 大结果自动返回受管 Result/ObjectRef；普通安全值显式 `put` 后可分段读取；未知 codec 明确拒绝；普通 namespace 不被自动扫描或 pickle。
+- **Integration**：Factorio binding 大结果自动返回受管 Result/ObjectRef；普通 namespace 不被自动扫描、pickle 或复制进模型上下文。
 - **Unit**：验证 action 10,000 字符边界、AST allowlist/deny cases、一个 cell 一个 effect、ID/step 单调性、State Ref compare-and-advance、8 KiB 预览截断、canonical content hash、对象 metadata/provenance、保留 binding 重装和隐藏字段不可见。
 - **Unit**：验证 ContextEnvelope schema/digest、首次/增量投影、Markdown/JSON escaping、namespace inventory、stdout 流式上限、`OUTPUT_LIMIT_EXCEEDED`/`KERNEL_RESOURCE_EXHAUSTED`、错误 `stateCertainty`、退出码和 Outcome 真值表。
 
-已完成同一 `runId=factorio-1786176474389-d489dcab` 的完整验收：Live 由模型在 7 次决策中提交 7 个 cell，真实 FLE verifier 达到 30/16 并记录 milkie Outcome `success/eval:fle`；Replay 的 projection digest 为 `sha256:eab1e30ce272f741ee8c2a6e497a4e80a7ef20bfb59f4e5a03471b12205c4216`，Kernel/FLE handler 与 live fallback 调用均为 0，全部 I/O 队列消费完毕。验收 evidence 位于本地忽略目录 `artifacts/factorio/runs/<runId>/`，摘要回链 Issue #1。
+已完成当前 v2 契约的同 run 验收：`runId=factorio-1786180257154-0d4ac6c4`。Live 由模型在 4 次决策中提交 4 个 cell，经 1 次 reset 和 3 次真实 step 达到 FLE verifier 30/16，并在 Trace、对象 hash、step/State 连续性全部前置通过后记录 milkie Outcome `success/eval:fle`。Replay projection digest 为 `sha256:57c6f3c42f4fc04ddd44b1682c8af76d9cf20438344033558c1f8ad1e646d10d`，Kernel/FLE handler 与 live fallback 调用均为 0，全部 I/O 队列消费完毕。Live/Replay evidence refs 分别为 `sha256:cd03a618b279cf2bd981e6c933892afd5fc88738019ae1989c76c44f452bc16c` 和 `sha256:e11633d1561569f252510724e118fe91c963d13d0e75176bbbd453ec3061b62f`。
 
 固定程序 smoke 只属于 Layer 0 环境自检：它证明 FLE adapter、任务和 verifier 可用，也可发现依赖/启动问题；它不得生成 Agent Outcome、不得满足 `S1.model-owned`，名称和文档必须明确带 `smoke`。
 
@@ -553,6 +533,7 @@ N/A — 本纵切依赖与验收边界均已落地；后续通用化需另立设
 | 2026-08-08 | L2 经用户评审批准，状态更新为 Approved | 模块、effect、上下文、对象和验收边界已达到可实现状态 |
 | 2026-08-08 | 未注册公开调用作为可恢复 API 错误；仅真实越权终止 Run | 支持模型探索纠错，同时保持 import/eval/文件/网络/私有属性等安全边界 |
 | 2026-08-08 | Live + Replay 同 run 验收通过，状态更新为 Implemented | FLE verifier、milkie Outcome、Trace、对象引用和零 live effect Replay 全部机器判定通过 |
+| 2026-08-08 | capability/Bridge/Kernel 升级至 v2 并完成回归 | 封锁动态 builtins/IPython 绕过，加入硬超时、RSS/CPU 预算、uncertain 终止、command ledger、前置 Outcome gate、8 KiB preview 与 State 链检查 |
 
 ## 13. 关联
 

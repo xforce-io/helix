@@ -43,6 +43,45 @@ class ActionPolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ACTION_TOO_LARGE"):
             bridge.validate_action("#" * 10_001)
 
+    def test_dynamic_builtin_and_callable_bypasses_are_rejected(self) -> None:
+        programs = (
+            '__builtins__["__import__"]("os").system("id")',
+            '__builtins__["open"]("/etc/passwd").read()',
+            '(lambda: print("dynamic"))()',
+        )
+        for program in programs:
+            with self.subTest(program=program):
+                with self.assertRaisesRegex(ValueError, "POLICY_VIOLATION"):
+                    bridge.validate_action(program)
+        with self.assertRaisesRegex(ValueError, "ACTION_CALL_NOT_ALLOWED"):
+            bridge.validate_action('nearest(Resource.IronOre).public_method()')
+
+    def test_step_exception_is_uncertain_but_validation_is_unchanged(self) -> None:
+        self.assertEqual(
+            bridge.classify_error(ValueError("POLICY_VIOLATION: blocked"), "step", False),
+            ("POLICY_VIOLATION", "unchanged"),
+        )
+        self.assertEqual(
+            bridge.classify_error(RuntimeError("connection dropped"), "step", True),
+            ("FLE_EXECUTION_ERROR", "uncertain"),
+        )
+
+    def test_command_ledger_returns_completed_result_without_reexecution(self) -> None:
+        ledger = bridge.CommandLedger()
+        calls = 0
+
+        def execute():
+            nonlocal calls
+            calls += 1
+            return {"ok": True, "result": {"tick": 60}}
+
+        first = ledger.execute("episode:1", "same-input", execute)
+        second = ledger.execute("episode:1", "same-input", execute)
+        self.assertEqual(first, second)
+        self.assertEqual(calls, 1)
+        with self.assertRaisesRegex(ValueError, "COMMAND_ID_CONFLICT"):
+            ledger.execute("episode:1", "different-input", execute)
+
 
 class KernelContractTest(unittest.TestCase):
     def test_outer_cell_boundary(self) -> None:
@@ -59,6 +98,36 @@ class KernelContractTest(unittest.TestCase):
         )
         self.assertEqual(result.get("observation"), {"score": 1})
         self.assertEqual(result["metrics"], {"tick": 0})
+
+    def test_ipython_and_dynamic_builtins_are_rejected(self) -> None:
+        for source in (
+            'get_ipython().system("id")',
+            '__builtins__["__import__"]("os").system("id")',
+            '__builtins__["open"]("/etc/passwd").read()',
+        ):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(ValueError, "POLICY_VIOLATION"):
+                    kernel.validate_cell(source)
+
+    def test_output_buffer_never_retains_more_than_the_preview_limit(self) -> None:
+        output = kernel.BoundedTextBuffer(8)
+        output.write("123456")
+        output.write("789012345")
+        self.assertEqual(output.getvalue(), "12345678")
+        self.assertTrue(output.truncated)
+
+    def test_resource_limits_are_explicit_and_positive(self) -> None:
+        limits = kernel.resource_limits_from_environment(
+            {
+                "HELIX_KERNEL_MEMORY_BYTES": "1073741824",
+                "HELIX_KERNEL_CPU_SECONDS": "600",
+            }
+        )
+        self.assertEqual(limits, (1073741824, 600))
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            kernel.resource_limits_from_environment(
+                {"HELIX_KERNEL_MEMORY_BYTES": "0", "HELIX_KERNEL_CPU_SECONDS": "600"}
+            )
 
 
 if __name__ == "__main__":
