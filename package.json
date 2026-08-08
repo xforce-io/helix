@@ -1,0 +1,41 @@
+{
+  "name": "helix-agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Model-owned RLM runtime and verifiable harness evolution on milkie.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "postinstall": "npm run build:milkie",
+    "build:milkie": "tsc -p node_modules/milkie/tsconfig.json",
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run check && npm run test:unit",
+    "test:unit": "tsx --test test/*.test.ts && uv run --project examples/factorio python -m unittest discover -s examples/factorio/tests -p 'test_*.py'",
+    "factorio:cluster:start": "uv run --project examples/factorio python examples/factorio/cluster.py start",
+    "factorio:cluster:stop": "uv run --project examples/factorio python examples/factorio/cluster.py stop",
+    "verify:factorio:live-smoke": "uv run --project examples/factorio python examples/factorio/verify_live.py",
+    "verify:factorio:live": "tsx src/factorio/live.ts",
+    "verify:factorio:replay": "tsx src/factorio/replay.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20.0.0",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "milkie": "https://github.com/xforce-io/milkie/archive/fc73bfa3fa6c2d7a1e5bb4fd81ea2b2da1997b5a.tar.gz"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}

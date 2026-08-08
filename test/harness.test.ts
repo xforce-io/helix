@@ -1,0 +1,201 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import type { IIOPort, ToolInvocationOptions } from 'milkie/dist/runtime/IOPort.js'
+import type { ModelRequest, ModelResponse } from 'milkie'
+import { digest } from '../src/factorio/canonical.js'
+import { runHarness } from '../src/factorio/harness.js'
+import type {
+  CellExecutionRecord,
+  FactorioEffect,
+  ObjectRef,
+  RunPins,
+} from '../src/factorio/types.js'
+
+const pins: RunPins = {
+  model: 'test-model',
+  harness: 'factorio-rlm/v1',
+  kernelProtocol: '1',
+  bindingSet: 'factorio/v1',
+  renderer: 'markdown-json/v1',
+  isolationProfile: 'local-process-ast/v1',
+  milkie: 'test-milkie',
+  fle: '0.4.3',
+  factorioServer: '2.0.73',
+  taskId: 'iron_ore_throughput',
+  taskDigest: 'sha256:test-task',
+}
+
+function ref(kind: ObjectRef['kind'], hash: string): ObjectRef {
+  return {
+    hash,
+    kind,
+    schema: `${kind}/v1`,
+    mediaType: kind === 'fle.action-program' ? 'text/plain' : 'application/json',
+    bytes: 128,
+    preview: { hiddenLargeValue: 'x'.repeat(100_000) },
+    truncated: true,
+  }
+}
+
+function record(
+  code: string,
+  cellId: string,
+  revision: number,
+  method: FactorioEffect['method'],
+  success: boolean,
+): CellExecutionRecord {
+  const observationRef = ref('fle.observation', `sha256:observation-${revision}`)
+  const stateRef = ref('fle.game-state', `sha256:state-${revision}`)
+  const programRef = method === 'step' ? ref('fle.action-program', `sha256:program-${revision}`) : undefined
+  const effect: FactorioEffect = {
+    method,
+    episodeId: 'run:episode:0',
+    stepIndex: method === 'reset' ? 0 : revision,
+    commandId: `command:${revision}`,
+    ...(programRef ? { programRef } : {}),
+    observationRef,
+    outputStateRef: stateRef,
+    actionCapabilities: ['nearest', 'place_entity'],
+    observation: {
+      rawText: success ? 'verifier passed' : 'throughput 2 of 16',
+      entities: [{ name: 'burner-mining-drill', privateNoise: 'y'.repeat(100_000) }],
+      inventory: [{ type: 'coal', quantity: '50' }],
+      taskVerification: { success: success ? 1 : 0, meta: [] },
+    },
+    reward: success ? 16 : 2,
+    terminated: success,
+    truncated: false,
+    verification: { success, meta: [] },
+    metrics: {
+      stepSeconds: 1,
+      tick: revision * 60,
+      productionScore: success ? 16 : 2,
+      automatedProductionScore: success ? 16 : 2,
+      actionHadError: false,
+    },
+  }
+  return {
+    schema: 'helix.cell-execution/v1',
+    cellId,
+    sourceDigest: digest(code),
+    startRevision: revision - 1,
+    endRevision: revision,
+    status: 'success',
+    stdoutPreview: 'z'.repeat(100_000),
+    stderrPreview: '',
+    stdoutTruncated: true,
+    stderrTruncated: false,
+    namespace: [{ name: 'factorio', type: 'FactorioBinding' }],
+    managedObjects: [...(programRef ? [programRef] : []), observationRef, stateRef],
+    factorioEffect: effect,
+  }
+}
+
+function toolResponse(id: string, code: string): ModelResponse {
+  const call = { id, name: 'execute_cell', input: { code } }
+  return {
+    content: [{ type: 'tool_use', ...call }],
+    toolCalls: [call],
+    finishReason: 'tool_use',
+  }
+}
+
+class FakePort implements IIOPort {
+  readonly requests: ModelRequest[] = []
+
+  constructor(private readonly responses: ModelResponse[]) {}
+
+  async invokeLLM(request: ModelRequest): Promise<ModelResponse> {
+    this.requests.push(request)
+    const response = this.responses.shift()
+    if (!response) throw new Error('unexpected model request')
+    return response
+  }
+
+  async invokeTool(
+    _toolName: string,
+    _input: unknown,
+    execute: () => Promise<unknown>,
+    _opts?: ToolInvocationOptions,
+  ): Promise<unknown> {
+    return execute()
+  }
+
+  now(): number {
+    return 0
+  }
+
+  uuid(): string {
+    return 'uuid'
+  }
+}
+
+test('模型重试仍保留最近真实反馈，且大对象不进入模型上下文', async () => {
+  const resetCode = 'factorio.reset()'
+  const stepCode = 'factorio.step("print(1)")'
+  const port = new FakePort([
+    toolResponse('reset-call', resetCode),
+    { content: [{ type: 'text', text: 'thinking only' }], toolCalls: [], finishReason: 'max_tokens' },
+    toolResponse('step-call', stepCode),
+  ])
+  let execution = 0
+  const result = await runHarness({
+    runId: 'run',
+    episodeId: 'run:episode:0',
+    pins,
+    port,
+    execute: async input => {
+      execution += 1
+      return record(
+        input.code,
+        input.cellId,
+        execution,
+        execution === 1 ? 'reset' : 'step',
+        execution === 2,
+      )
+    },
+  })
+
+  assert.equal(result.projection.verification.success, true)
+  assert.equal(result.feedbackLinked, true)
+  assert.equal(result.modelOwned, true)
+  assert.equal(port.requests.length, 3)
+  const retryContext = JSON.stringify(port.requests[2])
+  assert.match(retryContext, /run:cell:0/)
+  assert.match(retryContext, /throughput 2 of 16/)
+  assert.doesNotMatch(retryContext, /hiddenLargeValue/)
+  assert.ok(retryContext.length < 25_000, `retry context was ${retryContext.length} bytes`)
+})
+
+test('真正的策略越权会立即终止模型循环', async () => {
+  const code = 'factorio.step("eval(1)")'
+  const port = new FakePort([toolResponse('policy-call', code)])
+  const result = await runHarness({
+    runId: 'run',
+    episodeId: 'run:episode:0',
+    pins,
+    port,
+    execute: async input => ({
+      schema: 'helix.cell-execution/v1',
+      cellId: input.cellId,
+      sourceDigest: digest(input.code),
+      startRevision: 0,
+      endRevision: 1,
+      status: 'error',
+      stdoutPreview: '',
+      stderrPreview: '',
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      namespace: [],
+      managedObjects: [],
+      error: {
+        code: 'CELL_EXECUTION_ERROR',
+        message: 'POLICY_VIOLATION: eval is forbidden',
+      },
+    }),
+  })
+
+  assert.equal(port.requests.length, 1)
+  assert.equal(result.projection.cells.length, 1)
+  assert.equal(result.projection.verification.success, false)
+})

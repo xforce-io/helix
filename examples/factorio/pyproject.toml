@@ -1,0 +1,13 @@
+[project]
+name = "helix-factorio-example"
+version = "0.0.0"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  # FLE 0.4.3 still imports the pre-1.0 TextPart API.
+  "a2a-sdk<1",
+  "factorio-learning-environment==0.4.3",
+  "ipython>=8,<10",
+]
+
+[tool.uv]
+package = false
