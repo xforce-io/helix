@@ -10,6 +10,8 @@ import ast
 import contextlib
 import io
 import json
+import os
+import resource
 import sys
 import traceback
 from dataclasses import dataclass
@@ -18,8 +20,10 @@ from typing import Any
 
 from IPython.core.interactiveshell import InteractiveShell
 
-PROTOCOL_VERSION = "1"
+PROTOCOL_VERSION = "2"
 MAX_OUTPUT_CHARS = 8_192
+DEFAULT_MEMORY_BYTES = 1_073_741_824
+DEFAULT_CPU_SECONDS = 600
 DENIED_NAMES = {
     "__import__",
     "breakpoint",
@@ -27,6 +31,8 @@ DENIED_NAMES = {
     "eval",
     "exec",
     "globals",
+    "get_ipython",
+    "help",
     "input",
     "locals",
     "open",
@@ -35,6 +41,9 @@ DENIED_NAMES = {
     "socket",
     "subprocess",
     "sys",
+    "vars",
+    "exit",
+    "quit",
 }
 
 
@@ -58,10 +67,64 @@ def validate_cell(source: str) -> None:
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal)):
             raise ValueError(f"POLICY_VIOLATION: {type(node).__name__} is forbidden")
-        if isinstance(node, ast.Name) and node.id in DENIED_NAMES:
+        if isinstance(node, ast.Name) and (
+            node.id in DENIED_NAMES or node.id.startswith("_")
+        ):
             raise ValueError(f"POLICY_VIOLATION: name {node.id!r} is forbidden")
         if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
             raise ValueError("POLICY_VIOLATION: private attributes are forbidden")
+
+
+class BoundedTextBuffer(io.TextIOBase):
+    """A write sink that retains only the model-visible prefix."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self.limit = limit
+        self.parts: list[str] = []
+        self.length = 0
+        self.truncated = False
+
+    def write(self, value: str) -> int:
+        text = str(value)
+        remaining = max(0, self.limit - self.length)
+        if remaining:
+            retained = text[:remaining]
+            self.parts.append(retained)
+            self.length += len(retained)
+        if len(text) > remaining:
+            self.truncated = True
+        return len(text)
+
+    def getvalue(self) -> str:
+        return "".join(self.parts)
+
+
+def resource_limits_from_environment(env: dict[str, str] | os._Environ[str]) -> tuple[int, int]:
+    def positive(name: str, default: int) -> int:
+        raw = env.get(name, str(default))
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a positive integer") from exc
+        if value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+        return value
+
+    return (
+        positive("HELIX_KERNEL_MEMORY_BYTES", DEFAULT_MEMORY_BYTES),
+        positive("HELIX_KERNEL_CPU_SECONDS", DEFAULT_CPU_SECONDS),
+    )
+
+
+def apply_resource_limits() -> None:
+    memory_bytes, cpu_seconds = resource_limits_from_environment(os.environ)
+    # Darwin rejects lowering RLIMIT_AS for an already-loaded interpreter.
+    # The parent process enforces RSS there (and redundantly on Linux).
+    if sys.platform != "darwin":
+        _, address_space_hard = resource.getrlimit(resource.RLIMIT_AS)
+        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, address_space_hard))
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
 
 
 @dataclass
@@ -165,6 +228,7 @@ def truncate(value: str) -> tuple[str, bool]:
 
 
 def main() -> None:
+    apply_resource_limits()
     shell = InteractiveShell.instance()
     factorio = FactorioBinding()
     revision = 0
@@ -175,6 +239,19 @@ def main() -> None:
         except EOFError:
             return
         request_type = frame.get("type")
+        if frame.get("protocolVersion") != PROTOCOL_VERSION:
+            send(
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "type": "execute_result",
+                    "ok": False,
+                    "error": {
+                        "code": "PROTOCOL_VERSION_MISMATCH",
+                        "message": "kernel protocol version mismatch",
+                    },
+                }
+            )
+            continue
         if request_type == "close":
             send({"protocolVersion": PROTOCOL_VERSION, "type": "closed"})
             return
@@ -221,8 +298,8 @@ def main() -> None:
         factorio.begin_cell()
         shell.user_ns["factorio"] = factorio
         shell.user_ns["helix"] = SimpleNamespace(**(frame.get("bootstrap") or {}))
-        captured_stdout = io.StringIO()
-        captured_stderr = io.StringIO()
+        captured_stdout = BoundedTextBuffer(MAX_OUTPUT_CHARS)
+        captured_stderr = BoundedTextBuffer(MAX_OUTPUT_CHARS)
         error: dict[str, Any] | None = None
         try:
             validate_cell(source)
@@ -245,8 +322,16 @@ def main() -> None:
                 "traceback": traceback.format_exc(limit=4),
             }
 
-        stdout, stdout_truncated = truncate(captured_stdout.getvalue())
-        stderr, stderr_truncated = truncate(captured_stderr.getvalue())
+        stdout = captured_stdout.getvalue()
+        stderr = captured_stderr.getvalue()
+        stdout_truncated = captured_stdout.truncated
+        stderr_truncated = captured_stderr.truncated
+        if (stdout_truncated or stderr_truncated) and error is None:
+            error = {
+                "code": "OUTPUT_LIMIT_EXCEEDED",
+                "type": "ResourceError",
+                "message": "cell output exceeded the 8 KiB capture budget",
+            }
         revision += 1
         send(
             {

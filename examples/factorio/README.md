@@ -64,6 +64,12 @@ feedback until the environment verifier succeeds. The command prints a
 `runId` and writes canonical live evidence under
 `artifacts/factorio/runs/<runId>/live.json`.
 
+Live preflight verifies the exact Helix-labelled container, pinned Factorio
+image, FLE package version, task digest, and RCON reachability before the first
+model request. The v2 local capability profile enforces a 120-second FLE wall
+timeout, Kernel CPU/RSS budgets, an 8 KiB preview ceiling, and terminal
+handling for uncertain actions; it is not a production multi-tenant OS sandbox.
+
 Replay that exact run:
 
 ```bash
@@ -75,6 +81,8 @@ starts the Kernel or Bridge, verifies every object ref and projection digest,
 and writes `artifacts/factorio/runs/<runId>/replay.json`. Only a passing Live
 and Replay for the same `runId` satisfy Issue #1 S1.
 
-`npm test` covers the bounded model projection, retry feedback retention,
-terminal security violations, outer-cell policy, action size/allowlist rules,
-and mapping-style Kernel results without requiring Factorio.
+`npm test` covers dynamic-builtins/IPython escapes, action allowlisting,
+bounded projection and output, retry capability retention, wall/RSS limits,
+uncertain termination, command idempotency, stale revisions, preflight pins,
+Trace-before-Outcome ordering, and State Ref continuity without requiring
+Factorio.

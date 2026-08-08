@@ -13,16 +13,18 @@ import type {
 
 const pins: RunPins = {
   model: 'test-model',
-  harness: 'factorio-rlm/v1',
-  kernelProtocol: '1',
-  bindingSet: 'factorio/v1',
+  harness: 'factorio-rlm/v2',
+  kernelProtocol: '2',
+  bindingSet: 'factorio/v2',
   renderer: 'markdown-json/v1',
-  isolationProfile: 'local-process-ast/v1',
+  isolationProfile: 'local-process-ast/v2',
   milkie: 'test-milkie',
   fle: '0.4.3',
   factorioServer: '2.0.73',
   taskId: 'iron_ore_throughput',
   taskDigest: 'sha256:test-task',
+  kernelMemoryBytes: 1_073_741_824,
+  kernelCpuSeconds: 600,
 }
 
 function ref(kind: ObjectRef['kind'], hash: string): ObjectRef {
@@ -198,4 +200,80 @@ test('真正的策略越权会立即终止模型循环', async () => {
   assert.equal(port.requests.length, 1)
   assert.equal(result.projection.cells.length, 1)
   assert.equal(result.projection.verification.success, false)
+})
+
+test('不确定环境动作立即终止模型循环且不会盲重试', async () => {
+  const code = 'factorio.step("move_to(nearest(Resource.IronOre))")'
+  const port = new FakePort([toolResponse('uncertain-call', code)])
+  const result = await runHarness({
+    runId: 'run',
+    episodeId: 'run:episode:0',
+    pins,
+    port,
+    execute: async input => ({
+      schema: 'helix.cell-execution/v1',
+      cellId: input.cellId,
+      sourceDigest: digest(input.code),
+      startRevision: 0,
+      endRevision: 1,
+      status: 'error',
+      stdoutPreview: '',
+      stderrPreview: '',
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      namespace: [],
+      managedObjects: [],
+      error: {
+        code: 'FLE_TIMEOUT_UNCERTAIN',
+        message: 'step may have executed',
+        stateCertainty: 'uncertain',
+      },
+    }),
+  })
+
+  assert.equal(port.requests.length, 1)
+  assert.equal(result.projection.cells.length, 1)
+  assert.equal(result.uncertain, true)
+})
+
+test('Bridge 校验错误后下一轮仍保留最近确认的 action capabilities', async () => {
+  const resetCode = 'factorio.reset()'
+  const rejectedCode = 'factorio.step("dir()")'
+  const finalCode = 'factorio.step("print(1)")'
+  const port = new FakePort([
+    toolResponse('reset-call', resetCode),
+    toolResponse('rejected-call', rejectedCode),
+    toolResponse('final-call', finalCode),
+  ])
+  let execution = 0
+  await runHarness({
+    runId: 'run',
+    episodeId: 'run:episode:0',
+    pins,
+    port,
+    execute: async input => {
+      execution += 1
+      if (execution === 2) {
+        return {
+          schema: 'helix.cell-execution/v1', cellId: input.cellId,
+          sourceDigest: digest(input.code), startRevision: 1, endRevision: 2,
+          status: 'error', stdoutPreview: '', stderrPreview: '', stdoutTruncated: false,
+          stderrTruncated: false, namespace: [], managedObjects: [],
+          error: { code: 'ACTION_CALL_NOT_ALLOWED', message: "call 'dir' is not registered" },
+        }
+      }
+      return record(
+        input.code,
+        input.cellId,
+        execution,
+        execution === 1 ? 'reset' : 'step',
+        execution === 3,
+      )
+    },
+  })
+
+  const thirdRequest = JSON.stringify(port.requests[2])
+  assert.match(thirdRequest, /factorioActionCalls/)
+  assert.match(thirdRequest, /nearest/)
+  assert.match(thirdRequest, /place_entity/)
 })

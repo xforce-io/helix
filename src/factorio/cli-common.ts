@@ -11,6 +11,13 @@ export const OBJECT_ROOT = path.join(ARTIFACT_ROOT, 'objects')
 export const MILKIE_COMMIT = 'fc73bfa3fa6c2d7a1e5bb4fd81ea2b2da1997b5a'
 export const TASK_DIGEST =
   'sha256:c50497c8548123494e48376e51ace2dd4f66717421de3a9f930d5833b6572f44'
+const FACTORIO_CONTAINER = 'helix-factorio_0'
+const FACTORIO_IMAGE = 'factoriotools/factorio:2.0.73'
+
+export type CommandRunner = (file: string, args: string[]) => string
+
+const defaultRunner: CommandRunner = (file, args) =>
+  execFileSync(file, args, { encoding: 'utf8' })
 
 export function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name)
@@ -27,30 +34,60 @@ export function requireModel(): string {
 export function pins(model: string): RunPins {
   return {
     model,
-    harness: 'factorio-rlm/v1',
-    kernelProtocol: '1',
-    bindingSet: 'factorio/v1',
+    harness: 'factorio-rlm/v2',
+    kernelProtocol: '2',
+    bindingSet: 'factorio/v2',
     renderer: 'markdown-json/v1',
-    isolationProfile: 'local-process-ast/v1',
+    isolationProfile: 'local-process-ast/v2',
     milkie: MILKIE_COMMIT,
     fle: '0.4.3',
     factorioServer: '2.0.73',
     taskId: 'iron_ore_throughput',
     taskDigest: TASK_DIGEST,
+    kernelMemoryBytes: 1_073_741_824,
+    kernelCpuSeconds: 600,
   }
 }
 
-export function preflightLive(): void {
-  if (!process.env['ANTHROPIC_AUTH_TOKEN'] && !process.env['ANTHROPIC_API_KEY']) {
+export function preflightLive(
+  runner: CommandRunner = defaultRunner,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (!env['ANTHROPIC_AUTH_TOKEN'] && !env['ANTHROPIC_API_KEY']) {
     throw new Error('missing ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY')
   }
-  const names = execFileSync(
-    'docker',
-    ['ps', '--filter', 'name=factorio_', '--format', '{{.Names}}'],
-    { encoding: 'utf8' },
-  )
-  if (!names.trim()) {
-    throw new Error('no running Factorio container; run npm run factorio:cluster:start')
+  const inspected = JSON.parse(
+    runner('docker', [
+      'inspect',
+      '--format',
+      '{"running":{{.State.Running}},"image":{{json .Config.Image}},"label":{{json (index .Config.Labels "io.xforce.helix.factorio-smoke")}}}',
+      FACTORIO_CONTAINER,
+    ]),
+  ) as Record<string, unknown>
+  if (inspected['running'] !== true) {
+    throw new Error(`${FACTORIO_CONTAINER} is not running`)
+  }
+  if (inspected['image'] !== FACTORIO_IMAGE) {
+    throw new Error(
+      `Factorio image mismatch: expected ${FACTORIO_IMAGE}, got ${String(inspected['image'])}`,
+    )
+  }
+  if (inspected['label'] !== 'true') {
+    throw new Error(`Factorio container label mismatch for ${FACTORIO_CONTAINER}`)
+  }
+  const python =
+    env['HELIX_FACTORIO_PYTHON'] ?? path.resolve('examples/factorio/.venv/bin/python')
+  const facts = JSON.parse(
+    runner(python, [path.resolve('examples/factorio/workers/preflight_worker.py')]),
+  ) as Record<string, unknown>
+  if (facts['fle'] !== '0.4.3') {
+    throw new Error(`FLE version mismatch: expected 0.4.3, got ${String(facts['fle'])}`)
+  }
+  if (facts['taskId'] !== 'iron_ore_throughput' || facts['taskDigest'] !== TASK_DIGEST) {
+    throw new Error('FLE task identity or digest mismatch')
+  }
+  if (facts['rconReachable'] !== true) {
+    throw new Error('Factorio RCON handshake endpoint is unreachable')
   }
 }
 

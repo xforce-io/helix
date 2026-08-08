@@ -51,21 +51,28 @@ export interface CellExecutionRecord {
   namespace: Array<{ name: string; type: string; length?: number }>
   managedObjects: ObjectRef[]
   factorioEffect?: FactorioEffect
-  error?: { code: string; type?: string; message: string }
+  error?: {
+    code: string
+    type?: string
+    message: string
+    stateCertainty?: 'unchanged' | 'confirmed' | 'uncertain'
+  }
 }
 
 export interface RunPins {
   model: string
-  harness: 'factorio-rlm/v1'
-  kernelProtocol: '1'
-  bindingSet: 'factorio/v1'
+  harness: 'factorio-rlm/v2'
+  kernelProtocol: '2'
+  bindingSet: 'factorio/v2'
   renderer: 'markdown-json/v1'
-  isolationProfile: 'local-process-ast/v1'
+  isolationProfile: 'local-process-ast/v2'
   milkie: string
   fle: '0.4.3'
   factorioServer: '2.0.73'
   taskId: 'iron_ore_throughput'
   taskDigest: string
+  kernelMemoryBytes: number
+  kernelCpuSeconds: number
 }
 
 export interface EpisodeProjection {
@@ -78,6 +85,7 @@ export interface EpisodeProjection {
   cells: CellExecutionRecord[]
   lastObservationRef?: ObjectRef
   lastStateRef?: ObjectRef
+  actionCapabilities?: string[]
   verification: TaskVerification
   terminated: boolean
   truncated: boolean
