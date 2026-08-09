@@ -1,11 +1,19 @@
 import type { IIOPort } from 'milkie/dist/runtime/IOPort.js'
-import type { Message, ModelRequest, ModelResponse } from 'milkie'
+import {
+  IOControlError,
+  type IOInvocationControl,
+  type Message,
+  type ModelRequest,
+  type ModelResponse,
+} from 'milkie'
 import { canonicalJson, digest } from './canonical.js'
 import type {
   CellExecutionRecord,
   EpisodeProjection,
+  RunBudget,
   RunPins,
   TaskVerification,
+  TerminationReason,
 } from './types.js'
 import type { ExecuteCellInput } from './live-executor.js'
 
@@ -29,12 +37,14 @@ Call factorio.reset() exactly once, in the first cell. Never reset again after i
 
 Use execute_cell for action, not prose. Never ask the harness to provide a solution.`
 
-interface HarnessOptions {
+export interface HarnessOptions {
   runId: string
   episodeId: string
   pins: RunPins
   port: IIOPort
-  execute: (input: ExecuteCellInput) => Promise<CellExecutionRecord>
+  budget: RunBudget
+  control: IOInvocationControl
+  execute: (input: ExecuteCellInput, signal?: AbortSignal) => Promise<CellExecutionRecord>
 }
 
 export interface HarnessResult {
@@ -43,6 +53,8 @@ export interface HarnessResult {
   modelOwned: boolean
   feedbackLinked: boolean
   uncertain: boolean
+  termination: TerminationReason
+  toolCallCount: number
 }
 
 function initialProjection(runId: string, episodeId: string): EpisodeProjection {
@@ -84,10 +96,14 @@ function foldRecord(
   }
 }
 
-function contextEnvelope(projection: EpisodeProjection, pins: RunPins): Record<string, unknown> {
+function contextEnvelope(
+  projection: EpisodeProjection,
+  pins: RunPins,
+  remainingWallMs: number,
+): Record<string, unknown> {
   const lastCell = projection.cells.at(-1)
   return {
-    schema: 'helix.context/v1',
+    schema: 'helix.context/v2',
     runtime: {
       runId: projection.runId,
       episodeId: projection.episodeId,
@@ -133,6 +149,7 @@ function contextEnvelope(projection: EpisodeProjection, pins: RunPins): Record<s
       remainingCells: MAX_CELLS - projection.cells.length,
       remainingEnvironmentSteps: 64 - projection.stepCount,
       remainingModelCalls: MAX_MODEL_CALLS - projection.modelCallCount,
+      remainingWallMs,
     },
   }
 }
@@ -266,9 +283,21 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
   let feedbackLinked = true
   let modelOwned = true
   let uncertain = false
+  let toolCallCount = 0
+
+  const finish = (termination: TerminationReason): HarnessResult => ({
+    projection,
+    modelResponses,
+    modelOwned,
+    feedbackLinked,
+    uncertain,
+    termination,
+    toolCallCount,
+  })
 
   for (let modelOrdinal = 0; modelOrdinal < MAX_MODEL_CALLS; modelOrdinal += 1) {
-    const envelope = contextEnvelope(projection, options.pins)
+    const remainingWallMs = Math.max(0, options.budget.deadlineAt - options.port.now())
+    const envelope = contextEnvelope(projection, options.pins, remainingWallMs)
     const envelopeText = renderEnvelope(envelope)
     const messages = [
       ...priorExchange,
@@ -321,7 +350,16 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
         modelOrdinal,
       },
     }
-    const response = await options.port.invokeLLM(request)
+    let response: ModelResponse
+    try {
+      response = await options.port.invokeLLM(request, { control: options.control })
+    } catch (error) {
+      projection = { ...projection, modelCallCount: projection.modelCallCount + 1 }
+      if (error instanceof IOControlError) {
+        return finish(error.code === 'IO_CANCELLED' ? 'cancelled' : 'wall_budget_exhausted')
+      }
+      throw error
+    }
     modelResponses.push(response)
     projection = { ...projection, modelCallCount: projection.modelCallCount + 1 }
 
@@ -341,12 +379,22 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
       expectedEpisodeRevision: projection.resetCount + projection.stepCount,
       pinsDigest: digest(options.pins),
     }
-    const output = await options.port.invokeTool(
-      'helix.kernel.execute_cell',
-      cellInput,
-      () => options.execute(cellInput),
-      { toolCallId: authored.id },
-    )
+    let output: unknown
+    toolCallCount += 1
+    try {
+      output = await options.port.invokeTool(
+        'helix.kernel.execute_cell',
+        cellInput,
+        signal => options.execute(cellInput, signal),
+        { toolCallId: authored.id, control: options.control },
+      )
+    } catch (error) {
+      if (error instanceof IOControlError) {
+        uncertain = error.code === 'IO_DEADLINE_EXCEEDED'
+        return finish(error.code === 'IO_CANCELLED' ? 'cancelled' : 'uncertain_effect')
+      }
+      throw error
+    }
     const record = output as CellExecutionRecord
     modelOwned =
       modelOwned &&
@@ -370,18 +418,20 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
     ]
 
     if (`${record.error?.code ?? ''} ${record.error?.message ?? ''}`.includes('POLICY_VIOLATION')) {
-      break
+      return finish('policy_violation')
     }
-    if (record.error?.stateCertainty === 'uncertain') break
+    if (record.error?.stateCertainty === 'uncertain') return finish('uncertain_effect')
     if (
       record.error?.code === 'KERNEL_TIMEOUT' ||
       record.error?.code === 'KERNEL_RESOURCE_EXHAUSTED'
     ) {
-      break
+      return finish('kernel_resource_exhausted')
     }
-    if (verificationFrom(projection).success) break
-    if (projection.cells.length >= MAX_CELLS) break
+    if (verificationFrom(projection).success) return finish('verifier_succeeded')
+    if (projection.truncated) return finish('cell_budget_exhausted')
+    if (projection.terminated) return finish('environment_failed')
+    if (projection.cells.length >= MAX_CELLS) return finish('cell_budget_exhausted')
   }
 
-  return { projection, modelResponses, modelOwned, feedbackLinked, uncertain }
+  return finish('model_budget_exhausted')
 }

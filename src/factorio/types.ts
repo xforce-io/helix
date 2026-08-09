@@ -61,7 +61,7 @@ export interface CellExecutionRecord {
 
 export interface RunPins {
   model: string
-  harness: 'factorio-rlm/v2'
+  harness: 'factorio-rlm/v3'
   kernelProtocol: '2'
   bindingSet: 'factorio/v2'
   renderer: 'markdown-json/v1'
@@ -73,6 +73,30 @@ export interface RunPins {
   taskDigest: string
   kernelMemoryBytes: number
   kernelCpuSeconds: number
+}
+
+export interface RunBudget {
+  deadlineAt: number
+}
+
+export type TerminationReason =
+  | 'verifier_succeeded'
+  | 'model_budget_exhausted'
+  | 'cell_budget_exhausted'
+  | 'wall_budget_exhausted'
+  | 'cancelled'
+  | 'uncertain_effect'
+  | 'policy_violation'
+  | 'kernel_resource_exhausted'
+  | 'environment_failed'
+
+export interface FinalizationSummary {
+  status: 'finalized' | 'idempotent'
+  value: 'success' | 'failure' | 'partial' | 'unknown'
+  verifierId: string
+  finalizationId: string
+  intentHash: string
+  recordHash: string
 }
 
 export interface EpisodeProjection {
@@ -92,24 +116,29 @@ export interface EpisodeProjection {
 }
 
 export interface LiveEvidence {
-  schema: 'helix.factorio.live/v1'
+  schema: 'helix.factorio.live/v2'
   verdict: 'pass' | 'fail'
   runId: string
   pins: RunPins
+  budget: RunBudget & { remainingWallMsAtEnd: number }
+  termination: TerminationReason
   projectionDigest: string
   traceFile: string
   objectStore: string
   finalProjection: EpisodeProjection
-  outcome: { value: string; source: string }
+  finalization: FinalizationSummary
   checks: Array<{ id: string; passed: boolean; detail?: string }>
   evidenceRef?: string
 }
 
 export interface ReplayEvidence {
-  schema: 'helix.factorio.replay/v1'
+  schema: 'helix.factorio.replay/v2'
   verdict: 'pass' | 'fail'
   runId: string
+  termination: TerminationReason
   projectionDigest: string
+  finalization: FinalizationSummary
+  finalizationMatch: boolean
   liveEffectCount: number
   remainingIO: { llm: number; tool: number; clock: number; uuid: number }
   checks: Array<{ id: string; passed: boolean; detail?: string }>

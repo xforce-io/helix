@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { IIOPort, ToolInvocationOptions } from 'milkie/dist/runtime/IOPort.js'
+import type {
+  IIOPort,
+  LLMInvocationOptions,
+  ToolInvocationOptions,
+} from 'milkie/dist/runtime/IOPort.js'
 import type { ModelRequest, ModelResponse } from 'milkie'
 import { digest } from '../src/factorio/canonical.js'
 import { runHarness } from '../src/factorio/harness.js'
@@ -13,7 +17,7 @@ import type {
 
 const pins: RunPins = {
   model: 'test-model',
-  harness: 'factorio-rlm/v2',
+  harness: 'factorio-rlm/v3',
   kernelProtocol: '2',
   bindingSet: 'factorio/v2',
   renderer: 'markdown-json/v1',
@@ -104,11 +108,17 @@ function toolResponse(id: string, code: string): ModelResponse {
 
 class FakePort implements IIOPort {
   readonly requests: ModelRequest[] = []
+  readonly llmOptions: Array<LLMInvocationOptions | undefined> = []
+  readonly toolOptions: Array<ToolInvocationOptions | undefined> = []
 
   constructor(private readonly responses: ModelResponse[]) {}
 
-  async invokeLLM(request: ModelRequest): Promise<ModelResponse> {
+  async invokeLLM(
+    request: ModelRequest,
+    options?: LLMInvocationOptions,
+  ): Promise<ModelResponse> {
     this.requests.push(request)
+    this.llmOptions.push(options)
     const response = this.responses.shift()
     if (!response) throw new Error('unexpected model request')
     return response
@@ -118,8 +128,9 @@ class FakePort implements IIOPort {
     _toolName: string,
     _input: unknown,
     execute: () => Promise<unknown>,
-    _opts?: ToolInvocationOptions,
+    opts?: ToolInvocationOptions,
   ): Promise<unknown> {
+    this.toolOptions.push(opts)
     return execute()
   }
 
@@ -146,6 +157,8 @@ test('模型重试仍保留最近真实反馈，且大对象不进入模型上�
     episodeId: 'run:episode:0',
     pins,
     port,
+    budget: { deadlineAt: 10_000 },
+    control: { deadlineAt: 10_000 },
     execute: async input => {
       execution += 1
       return record(
@@ -161,10 +174,14 @@ test('模型重试仍保留最近真实反馈，且大对象不进入模型上�
   assert.equal(result.projection.verification.success, true)
   assert.equal(result.feedbackLinked, true)
   assert.equal(result.modelOwned, true)
+  assert.equal(result.termination, 'verifier_succeeded')
+  assert.equal(port.llmOptions.every(options => options?.control?.deadlineAt === 10_000), true)
+  assert.equal(port.toolOptions.every(options => options?.control?.deadlineAt === 10_000), true)
   assert.equal(port.requests.length, 3)
   const retryContext = JSON.stringify(port.requests[2])
   assert.match(retryContext, /run:cell:0/)
   assert.match(retryContext, /throughput 2 of 16/)
+  assert.match(retryContext, /remainingWallMs/)
   assert.doesNotMatch(retryContext, /hiddenLargeValue/)
   assert.ok(retryContext.length < 25_000, `retry context was ${retryContext.length} bytes`)
 })
@@ -177,6 +194,8 @@ test('真正的策略越权会立即终止模型循环', async () => {
     episodeId: 'run:episode:0',
     pins,
     port,
+    budget: { deadlineAt: 10_000 },
+    control: { deadlineAt: 10_000 },
     execute: async input => ({
       schema: 'helix.cell-execution/v1',
       cellId: input.cellId,
@@ -200,6 +219,7 @@ test('真正的策略越权会立即终止模型循环', async () => {
   assert.equal(port.requests.length, 1)
   assert.equal(result.projection.cells.length, 1)
   assert.equal(result.projection.verification.success, false)
+  assert.equal(result.termination, 'policy_violation')
 })
 
 test('不确定环境动作立即终止模型循环且不会盲重试', async () => {
@@ -210,6 +230,8 @@ test('不确定环境动作立即终止模型循环且不会盲重试', async ()
     episodeId: 'run:episode:0',
     pins,
     port,
+    budget: { deadlineAt: 10_000 },
+    control: { deadlineAt: 10_000 },
     execute: async input => ({
       schema: 'helix.cell-execution/v1',
       cellId: input.cellId,
@@ -234,6 +256,7 @@ test('不确定环境动作立即终止模型循环且不会盲重试', async ()
   assert.equal(port.requests.length, 1)
   assert.equal(result.projection.cells.length, 1)
   assert.equal(result.uncertain, true)
+  assert.equal(result.termination, 'uncertain_effect')
 })
 
 test('Bridge 校验错误后下一轮仍保留最近确认的 action capabilities', async () => {
@@ -251,6 +274,8 @@ test('Bridge 校验错误后下一轮仍保留最近确认的 action capabilitie
     episodeId: 'run:episode:0',
     pins,
     port,
+    budget: { deadlineAt: 10_000 },
+    control: { deadlineAt: 10_000 },
     execute: async input => {
       execution += 1
       if (execution === 2) {

@@ -1,16 +1,24 @@
-import { FileTraceObjectStore } from 'milkie'
+import {
+  FileTaskOutcomeFinalizationStore,
+  FileTraceObjectStore,
+  MemoryStore,
+  Milkie,
+} from 'milkie'
 import type { IIOPort } from 'milkie/dist/runtime/IOPort.js'
 import { JsonlEventStore } from 'milkie/dist/trace/JsonlEventStore.js'
 import { CacheIndex } from 'milkie/dist/trace/CacheIndex.js'
 import { ReplayingIOPort } from 'milkie/dist/trace/ReplayingIOPort.js'
-import type { Event, TaskOutcomeRecordedPayload } from 'milkie/dist/trace/types.js'
+import type { Event } from 'milkie/dist/trace/types.js'
 import { digest } from './canonical.js'
 import {
   argument,
   attachEvidenceRef,
+  FINALIZATION_ROOT,
   objectStore,
   pins,
   readLiveEvidence,
+  REPLAY_WALL_TIMEOUT_MS,
+  summarizeFinalization,
   TRACE_ROOT,
   writeEvidence,
 } from './cli-common.js'
@@ -61,6 +69,8 @@ async function main(): Promise<void> {
     episodeId: `${runId}:episode:0`,
     pins: replayPins,
     port,
+    budget: { deadlineAt: live.budget.deadlineAt },
+    control: { deadlineAt: Date.now() + REPLAY_WALL_TIMEOUT_MS },
     execute: async () => {
       liveEffectCount += 1
       throw new Error('Kernel/FLE handler executed during replay')
@@ -72,44 +82,69 @@ async function main(): Promise<void> {
   const objectRefsValid = (
     await Promise.all(objectRefs.map(ref => objects.has(ref.hash)))
   ).every(Boolean)
-  const outcomeEvents = events.filter(event => event.type === 'task.outcome.recorded')
-  const latestOutcome = outcomeEvents.at(-1)?.payload as TaskOutcomeRecordedPayload | undefined
+  const milkie = new Milkie({
+    stateStore: new MemoryStore(),
+    eventStore,
+    traceObjectStore: objects,
+    outcomeFinalizationStore: new FileTaskOutcomeFinalizationStore(FINALIZATION_ROOT),
+  })
+  const storedFinalization = await milkie.getFinalTaskOutcome(runId)
+  if (!storedFinalization) throw new Error(`no final task outcome for ${runId}`)
+  const finalization = summarizeFinalization(
+    live.finalization.status,
+    storedFinalization,
+  )
   const checks = [
     {
-      id: 'S1.replay-zero-live-effects',
+      id: 'S3.replay-zero-live-effects',
       passed: liveEffectCount === 0 && denied.calls === 0,
       detail: `handler=${liveEffectCount} deniedPort=${denied.calls}`,
     },
     {
-      id: 'S1.replay-io-consumed',
+      id: 'S3.replay-io-consumed',
       passed: Object.values(remainingIO).every(value => value === 0),
       detail: JSON.stringify(remainingIO),
     },
     {
-      id: 'S1.replay-projection',
+      id: 'S3.replay-projection',
       passed:
         digest(result.projection) === live.projectionDigest &&
-        result.projection.verification.success,
+        result.termination === live.termination,
     },
     {
-      id: 'S1.replay-model-owned',
+      id: 'S3.replay-model-owned',
       passed: result.modelOwned && result.feedbackLinked,
     },
     {
-      id: 'S1.replay-object-refs',
+      id: 'S3.replay-object-refs',
       passed: objectRefsValid,
       detail: `${objectRefs.length} refs verified`,
     },
     {
-      id: 'S1.replay-outcome',
-      passed: latestOutcome?.value === 'success' && latestOutcome.source === 'eval:fle',
+      id: 'S3.replay-finalization',
+      passed:
+        finalization.value === live.finalization.value &&
+        finalization.finalizationId === live.finalization.finalizationId &&
+        finalization.intentHash === live.finalization.intentHash &&
+        finalization.recordHash === live.finalization.recordHash,
+    },
+    {
+      id: 'S3.live-success',
+      passed: live.verdict === 'pass' && finalization.value === 'success',
     },
   ]
   const evidenceCore: ReplayEvidence = {
-    schema: 'helix.factorio.replay/v1',
+    schema: 'helix.factorio.replay/v2',
     verdict: checks.every(check => check.passed) ? 'pass' : 'fail',
     runId,
+    termination: result.termination,
     projectionDigest: digest(result.projection),
+    finalization,
+    finalizationMatch:
+      finalization.value === live.finalization.value &&
+      finalization.finalizationId === live.finalization.finalizationId &&
+      finalization.intentHash === live.finalization.intentHash &&
+      finalization.recordHash === live.finalization.recordHash,
     liveEffectCount,
     remainingIO,
     checks,

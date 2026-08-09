@@ -1,14 +1,22 @@
 import { execFileSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { FileTraceObjectStore } from 'milkie'
+import { FileTraceObjectStore, type TaskOutcomeFinalization } from 'milkie'
 import { canonicalJson } from './canonical.js'
-import type { LiveEvidence, ReplayEvidence, RunPins } from './types.js'
+import type {
+  FinalizationSummary,
+  LiveEvidence,
+  ReplayEvidence,
+  RunPins,
+} from './types.js'
 
 export const ARTIFACT_ROOT = path.resolve('artifacts/factorio')
 export const TRACE_ROOT = path.join(ARTIFACT_ROOT, 'traces')
 export const OBJECT_ROOT = path.join(ARTIFACT_ROOT, 'objects')
-export const MILKIE_COMMIT = 'fc73bfa3fa6c2d7a1e5bb4fd81ea2b2da1997b5a'
+export const FINALIZATION_ROOT = path.join(ARTIFACT_ROOT, 'final-outcomes')
+export const LIVE_WALL_TIMEOUT_MS = 30 * 60 * 1_000
+export const REPLAY_WALL_TIMEOUT_MS = 5 * 60 * 1_000
+export const MILKIE_COMMIT = 'd74128cf3ac976ebd68eb1b87f340574811c6366'
 export const TASK_DIGEST =
   'sha256:c50497c8548123494e48376e51ace2dd4f66717421de3a9f930d5833b6572f44'
 const FACTORIO_CONTAINER = 'helix-factorio_0'
@@ -34,7 +42,7 @@ export function requireModel(): string {
 export function pins(model: string): RunPins {
   return {
     model,
-    harness: 'factorio-rlm/v2',
+    harness: 'factorio-rlm/v3',
     kernelProtocol: '2',
     bindingSet: 'factorio/v2',
     renderer: 'markdown-json/v1',
@@ -107,6 +115,20 @@ export async function writeEvidence(
 
 export function objectStore(): FileTraceObjectStore {
   return new FileTraceObjectStore(OBJECT_ROOT)
+}
+
+export function summarizeFinalization(
+  status: 'finalized' | 'idempotent',
+  final: TaskOutcomeFinalization,
+): FinalizationSummary {
+  return {
+    status,
+    value: final.value,
+    verifierId: final.verifierClaim.id,
+    finalizationId: final.finalizationId,
+    intentHash: final.intentHash,
+    recordHash: final.recordHash,
+  }
 }
 
 export async function attachEvidenceRef<T extends LiveEvidence | ReplayEvidence>(

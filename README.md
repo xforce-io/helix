@@ -41,12 +41,13 @@ IOPort. Helix does not train or modify foundation-model weights at runtime.
 The first end-to-end vertical is implemented: an external model owns a
 persistent IPython feedback loop, solves the real FLE
 `iron_ore_throughput` task through model-authored cells, records all model and
-cell I/O plus the task outcome through milkie, and replays the same run with
+cell I/O plus an immutable, evidence-bound task finalization through milkie,
+and replays the same run with
 zero live model, Kernel, Bridge, or Factorio effects.
 
 This remains an example-level contract rather than a general public runtime
 API. milkie is pinned to immutable commit
-`fc73bfa3fa6c2d7a1e5bb4fd81ea2b2da1997b5a`; `postinstall` builds that source
+`d74128cf3ac976ebd68eb1b87f340574811c6366`; `postinstall` builds that source
 dependency because the GitHub source archive does not contain generated
 `dist` files.
 
@@ -59,6 +60,9 @@ See the [project overview](./docs/overview.md) and
 [Issue #1](https://github.com/xforce-io/helix/issues/1) for the initial
 architecture. The approved L1 is expanded by the
 [implemented Factorio L2 design](./docs/design/1-rlm-factorio-harness.md).
+The v3 runtime/finalization contract is specified by
+[Issue #3](https://github.com/xforce-io/helix/issues/3) and its
+[L2 design](./docs/design/3-factorio-milkie-runtime-contracts.md).
 
 ## Development
 
