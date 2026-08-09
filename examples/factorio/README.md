@@ -45,7 +45,7 @@ remove a container unless that Helix label is present.
 
 This smoke gate proves only that Helix can reach and change a real video-game
 environment. It does not satisfy Issue #1; the Agent gate additionally
-requires model-generated cells, milkie Trace/Outcome, and a zero-live-effect
+requires model-generated cells, milkie Trace/finalization, and a zero-live-effect
 Replay.
 
 For the Agent gate, configure an Anthropic-compatible model endpoint without
@@ -66,9 +66,13 @@ feedback until the environment verifier succeeds. The command prints a
 
 Live preflight verifies the exact Helix-labelled container, pinned Factorio
 image, FLE package version, task digest, and RCON reachability before the first
-model request. The v2 local capability profile enforces a 120-second FLE wall
-timeout, Kernel CPU/RSS budgets, an 8 KiB preview ceiling, and terminal
-handling for uncertain actions; it is not a production multi-tenant OS sandbox.
+model request. The v3 harness fixes one 30-minute run deadline and propagates
+it through milkie to every model and Tool call; the v2 local capability profile
+also enforces a 120-second FLE wall timeout, Kernel CPU/RSS budgets, an 8 KiB
+preview ceiling, and terminal handling for uncertain actions. The formal task
+result is stored once in `artifacts/factorio/final-outcomes`, bound to verifier
+and run-completion events; observation Outcome is not used as the final result.
+This remains an example profile, not a production multi-tenant OS sandbox.
 
 Replay that exact run:
 
@@ -84,5 +88,6 @@ and Replay for the same `runId` satisfy Issue #1 S1.
 `npm test` covers dynamic-builtins/IPython escapes, action allowlisting,
 bounded projection and output, retry capability retention, wall/RSS limits,
 uncertain termination, command idempotency, stale revisions, preflight pins,
-Trace-before-Outcome ordering, and State Ref continuity without requiring
+Trace-before-finalization ordering, deadline/cancellation settlement,
+finalization conflict handling, and State Ref continuity without requiring
 Factorio.

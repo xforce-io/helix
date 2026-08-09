@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
-import { AnthropicAdapter, MemoryStore, Milkie, type ITraceObjectStore } from 'milkie'
+import {
+  AnthropicAdapter,
+  FileTaskOutcomeFinalizationStore,
+  MemoryStore,
+  Milkie,
+  type ITraceObjectStore,
+} from 'milkie'
 import { DefaultIOPort } from 'milkie/dist/runtime/IOPort.js'
 import { JsonlEventStore } from 'milkie/dist/trace/JsonlEventStore.js'
 import { RecordingIOPort } from 'milkie/dist/trace/RecordingIOPort.js'
@@ -10,21 +16,30 @@ import { digest } from './canonical.js'
 import {
   argument,
   attachEvidenceRef,
+  FINALIZATION_ROOT,
+  LIVE_WALL_TIMEOUT_MS,
   objectStore,
   OBJECT_ROOT,
   pins,
   preflightLive,
   requireModel,
+  summarizeFinalization,
   TRACE_ROOT,
   writeEvidence,
 } from './cli-common.js'
 import { runHarness } from './harness.js'
 import { LiveCellExecutor } from './live-executor.js'
-import type { CellExecutionRecord, LiveEvidence, ObjectRef } from './types.js'
+import type {
+  CellExecutionRecord,
+  LiveEvidence,
+  ObjectRef,
+  TerminationReason,
+} from './types.js'
 import {
-  decideOutcome,
+  decideFinalOutcome,
   episodeContinuityCheck,
-  traceChecksBeforeOutcome,
+  finalizationEvidenceEventIds,
+  traceChecksBeforeFinalization,
 } from './verification.js'
 
 function allObjectRefs(records: CellExecutionRecord[]): ObjectRef[] {
@@ -35,11 +50,31 @@ async function refsExist(store: ITraceObjectStore, refs: ObjectRef[]): Promise<b
   return (await Promise.all(refs.map(ref => store.has(ref.hash)))).every(Boolean)
 }
 
+function completionStatus(
+  termination: TerminationReason,
+): 'completed' | 'interrupted' | 'error' {
+  if (termination === 'cancelled') return 'interrupted'
+  if (
+    termination === 'verifier_succeeded' ||
+    termination === 'model_budget_exhausted' ||
+    termination === 'cell_budget_exhausted' ||
+    termination === 'wall_budget_exhausted'
+  ) {
+    return 'completed'
+  }
+  return 'error'
+}
+
 async function main(): Promise<void> {
   preflightLive()
   const model = requireModel()
   const runId = `factorio-${Date.now()}-${randomUUID().slice(0, 8)}`
   const episodeId = `${runId}:episode:0`
+  const budget = { deadlineAt: Date.now() + LIVE_WALL_TIMEOUT_MS }
+  const controller = new AbortController()
+  const cancel = () => controller.abort()
+  process.once('SIGINT', cancel)
+  process.once('SIGTERM', cancel)
   const runPins = pins(model)
   const traceStore = new JsonlEventStore(TRACE_ROOT)
   const objects = objectStore()
@@ -59,11 +94,13 @@ async function main(): Promise<void> {
     new CausalCursor(),
   )
   const executor = new LiveCellExecutor(runId, episodeId, runPins, objects)
+  const finalizationStore = new FileTaskOutcomeFinalizationStore(FINALIZATION_ROOT)
   const milkie = new Milkie({
     stateStore: new MemoryStore(),
     gateway,
     eventStore: traceStore,
     traceObjectStore: objects,
+    outcomeFinalizationStore: finalizationStore,
   })
 
   await port.attach({
@@ -74,25 +111,37 @@ async function main(): Promise<void> {
   })
 
   let harnessResult: Awaited<ReturnType<typeof runHarness>>
+  let detached = false
+  const detachOnce = async (
+    payload: Parameters<typeof port.detach>[0],
+  ): Promise<void> => {
+    if (detached) return
+    detached = true
+    await port.detach(payload)
+  }
   try {
     harnessResult = await runHarness({
       runId,
       episodeId,
       pins: runPins,
       port,
-      execute: input => executor.execute(input),
+      budget,
+      control: { deadlineAt: budget.deadlineAt, signal: controller.signal },
+      execute: (input, signal) => executor.execute(input, signal),
     })
-    await port.detach({
-      status: 'completed',
+    await detachOnce({
+      status: completionStatus(harnessResult.termination),
       lastTextOutput: harnessResult.projection.verification.success
         ? 'FLE verifier succeeded'
-        : 'FLE verifier did not succeed',
+        : `FLE verifier did not succeed (${harnessResult.termination})`,
     })
   } catch (error) {
-    await port.detach({ status: 'error', error: String(error) })
+    await detachOnce({ status: 'error', error: String(error) })
     throw error
   } finally {
     await executor.close()
+    process.off('SIGINT', cancel)
+    process.off('SIGTERM', cancel)
   }
 
   const projection = harnessResult.projection
@@ -149,19 +198,33 @@ async function main(): Promise<void> {
     },
     episodeContinuityCheck(projection.cells),
   ]
-  const eventsBeforeOutcome = (await traceStore.readByRunId(runId)) as Event[]
-  const preOutcomeTraceChecks = traceChecksBeforeOutcome(
-    eventsBeforeOutcome,
+  const eventsBeforeFinalization = (await traceStore.readByRunId(runId)) as Event[]
+  const preFinalizationTraceChecks = traceChecksBeforeFinalization(
+    eventsBeforeFinalization,
     projection.modelCallCount,
-    projection.cells.length,
+    harnessResult.toolCallCount,
   )
-  const preOutcomeChecks = [...baseChecks, ...preOutcomeTraceChecks]
-  const outcomeValue = decideOutcome(preOutcomeChecks, harnessResult.uncertain)
+  const preFinalizationChecks = [...baseChecks, ...preFinalizationTraceChecks]
+  const outcomeValue = decideFinalOutcome(
+    preFinalizationChecks,
+    harnessResult.termination,
+  )
   const finalObservationHash = projection.lastObservationRef?.hash ?? 'none'
-  const outcome = await milkie.recordTaskOutcome({
+  const [terminalEventId, completionEventId] = finalizationEvidenceEventIds(
+    eventsBeforeFinalization,
+    projection,
+    harnessResult.termination,
+  )
+  const finalizationAttempt = await milkie.finalizeTaskOutcome({
     runId,
+    expectedState: 'unfinalized',
+    finalizationId: `${runId}:eval:fle:v2`,
     value: outcomeValue,
-    source: 'eval:fle',
+    verifierClaim: { type: 'eval', id: 'helix.factorio.fle/v2' },
+    evidence: [
+      { kind: 'event', eventId: terminalEventId },
+      { kind: 'event', eventId: completionEventId },
+    ],
     note: `Deterministic Helix Factorio live verifier; finalObservationRef=${finalObservationHash}`,
     scores: [
       { name: 'modelCalls', value: projection.modelCallCount },
@@ -169,31 +232,42 @@ async function main(): Promise<void> {
       { name: 'steps', value: projection.stepCount },
     ],
   })
-  const events = (await traceStore.readByRunId(runId)) as Event[]
-  const traceCheck = {
-    id: 'S1.milkie-outcome-event',
-    passed: events.filter(event => event.type === 'task.outcome.recorded').length === 1,
-    detail: `${events.length} events`,
+  if (finalizationAttempt.status === 'conflict') {
+    throw new Error(
+      `task outcome finalization conflict: ${finalizationAttempt.conflict.kind}`,
+    )
   }
-  const outcomeCheck = {
-    id: 'S1.milkie-outcome',
+  const finalization = summarizeFinalization(
+    finalizationAttempt.status,
+    finalizationAttempt.final,
+  )
+  const finalizationCheck = {
+    id: 'S2.milkie-finalization',
     passed:
-      outcome.value === outcomeValue &&
-      outcome.source === 'eval:fle' &&
-      (outcome.value !== 'success' || outcome.note?.includes(finalObservationHash) === true),
-    detail: `${outcome.value}/${outcome.source}`,
+      finalization.value === outcomeValue &&
+      finalization.verifierId === 'helix.factorio.fle/v2' &&
+      (finalization.status === 'finalized' || finalization.status === 'idempotent'),
+    detail: `${finalization.status}/${finalization.value}/${finalization.recordHash}`,
   }
-  const checks = [...preOutcomeChecks, traceCheck, outcomeCheck]
+  const checks = [...preFinalizationChecks, finalizationCheck]
   const evidenceCore: LiveEvidence = {
-    schema: 'helix.factorio.live/v1',
-    verdict: checks.every(check => check.passed) ? 'pass' : 'fail',
+    schema: 'helix.factorio.live/v2',
+    verdict:
+      checks.every(check => check.passed) && finalization.value === 'success'
+        ? 'pass'
+        : 'fail',
     runId,
     pins: runPins,
+    budget: {
+      ...budget,
+      remainingWallMsAtEnd: Math.max(0, budget.deadlineAt - Date.now()),
+    },
+    termination: harnessResult.termination,
     projectionDigest: digest(projection),
     traceFile: path.join(TRACE_ROOT, `${runId}.jsonl`),
     objectStore: OBJECT_ROOT,
     finalProjection: projection,
-    outcome: { value: outcome.value, source: outcome.source },
+    finalization,
     checks,
   }
   const evidence = await attachEvidenceRef(objects, evidenceCore)
@@ -205,8 +279,10 @@ async function main(): Promise<void> {
         verdict: evidence.verdict,
         runId: evidence.runId,
         pins: evidence.pins,
+        budget: evidence.budget,
         projectionDigest: evidence.projectionDigest,
-        outcome: evidence.outcome,
+        termination: evidence.termination,
+        finalization: evidence.finalization,
         checks: evidence.checks,
         evidenceRef: evidence.evidenceRef,
       },
@@ -216,7 +292,12 @@ async function main(): Promise<void> {
   )
   console.log(`runId=${runId}`)
   console.log(`evidence=${output}`)
-  process.exitCode = evidence.verdict === 'pass' ? 0 : 1
+  process.exitCode =
+    evidence.verdict === 'pass'
+      ? 0
+      : harnessResult.termination === 'cancelled'
+        ? 130
+        : 1
 }
 
 main().catch(error => {

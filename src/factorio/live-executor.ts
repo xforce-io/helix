@@ -173,6 +173,7 @@ export class LiveCellExecutor {
   private kernel: JsonLineProcess | undefined
   private bridge: JsonLineProcess | undefined
   private bridgeOrdinal = 0
+  private commandOrdinal = 0
   private stateRaw: string | undefined
   private stateRef: ObjectRef | undefined
   private resetCount = 0
@@ -227,6 +228,7 @@ export class LiveCellExecutor {
     method: 'reset' | 'step',
     commandId: string,
     params: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<BridgeResult> {
     const bridge = this.ensureBridge()
     const id = `${this.runId}:bridge:${this.bridgeOrdinal++}`
@@ -235,6 +237,7 @@ export class LiveCellExecutor {
       timeoutMs: FLE_STEP_TIMEOUT_MS,
       code: method === 'step' ? 'FLE_TIMEOUT_UNCERTAIN' : 'FLE_RESET_TIMEOUT',
       stateCertainty: method === 'step' ? 'uncertain' : 'unchanged',
+      ...(signal === undefined ? {} : { signal }),
     })
     if (response['id'] !== id) throw new Error(`bridge response id mismatch for ${id}`)
     if (response['ok'] !== true) {
@@ -254,6 +257,7 @@ export class LiveCellExecutor {
 
   private async handleEffect(
     frame: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<{ result: Record<string, unknown>; effect: FactorioEffect }> {
     const method = frame['method']
     if (method !== 'reset' && method !== 'step') {
@@ -275,13 +279,16 @@ export class LiveCellExecutor {
     const program = method === 'step' ? String(params['program'] ?? '') : undefined
     const inputStateRef = this.stateRef
     const stepIndex = method === 'reset' ? 0 : this.stepCount + 1
-    const commandId = `${this.episodeId}:${stepIndex}`
+    // A failed bridge command can be safely unchanged while still being recorded by
+    // the idempotency ledger. A later model-authored retry is a new command, even
+    // though it targets the same episode step.
+    const commandId = `${this.episodeId}:command:${this.commandOrdinal++}`
     const bridgeResult = await this.bridgeRequest(method, commandId, {
       ...(program === undefined ? {} : { program }),
       ...(method === 'step' && this.stateRaw !== undefined
         ? { stateRaw: this.stateRaw }
         : {}),
-    })
+    }, signal)
     this.effectCount += 1
 
     const preview = boundedObservation(bridgeResult.observation)
@@ -358,7 +365,7 @@ export class LiveCellExecutor {
     }
   }
 
-  async execute(input: ExecuteCellInput): Promise<CellExecutionRecord> {
+  async execute(input: ExecuteCellInput, signal?: AbortSignal): Promise<CellExecutionRecord> {
     const contractError = (code: string, message: string): CellExecutionRecord => ({
       schema: 'helix.cell-execution/v1',
       cellId: input.cellId,
@@ -416,6 +423,7 @@ export class LiveCellExecutor {
           timeoutMs: KERNEL_CELL_TIMEOUT_MS,
           code: 'KERNEL_TIMEOUT',
           stateCertainty: factorioEffect ? 'confirmed' : 'unchanged',
+          ...(signal === undefined ? {} : { signal }),
         })
       } catch (error) {
         const structured = error as Error & {
@@ -454,7 +462,7 @@ export class LiveCellExecutor {
       }
       if (frame['type'] === 'effect_request') {
         try {
-          const handled = await this.handleEffect(frame)
+          const handled = await this.handleEffect(frame, signal)
           factorioEffect = handled.effect
           kernel.send({ type: 'effect_response', ok: true, result: handled.result })
         } catch (error) {

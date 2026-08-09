@@ -7,6 +7,7 @@ export interface ReceiveOptions {
   timeoutMs: number
   code: string
   stateCertainty?: 'unchanged' | 'confirmed' | 'uncertain'
+  signal?: AbortSignal
 }
 
 export interface ProcessLimits {
@@ -119,6 +120,7 @@ export class JsonLineProcess {
   async receive(options?: ReceiveOptions): Promise<Frame> {
     if (!options) return this.frames.next()
     let timer: NodeJS.Timeout | undefined
+    let onAbort: (() => void) | undefined
     try {
       return await Promise.race([
         this.frames.next(),
@@ -137,9 +139,25 @@ export class JsonLineProcess {
             reject(error)
           }, options.timeoutMs)
         }),
+        new Promise<never>((_resolve, reject) => {
+          if (!options.signal) return
+          onAbort = () => {
+            const error = Object.assign(new Error(`${this.label} execution cancelled`), {
+              code: 'PROCESS_ABORTED',
+              ...(options.stateCertainty === undefined
+                ? {}
+                : { stateCertainty: options.stateCertainty }),
+            })
+            this.child.kill('SIGKILL')
+            reject(error)
+          }
+          if (options.signal.aborted) onAbort()
+          else options.signal.addEventListener('abort', onAbort, { once: true })
+        }),
       ])
     } finally {
       if (timer) clearTimeout(timer)
+      if (onAbort) options.signal?.removeEventListener('abort', onAbort)
     }
   }
 

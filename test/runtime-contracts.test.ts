@@ -6,9 +6,9 @@ import { JsonLineProcess } from '../src/factorio/line-process.js'
 import { LiveCellExecutor } from '../src/factorio/live-executor.js'
 import { boundedObservation } from '../src/factorio/live-executor.js'
 import {
-  decideOutcome,
+  decideFinalOutcome,
   episodeContinuityCheck,
-  traceChecksBeforeOutcome,
+  traceChecksBeforeFinalization,
 } from '../src/factorio/verification.js'
 import { canonicalJson, digest } from '../src/factorio/canonical.js'
 import { MemoryTraceObjectStore } from 'milkie'
@@ -24,6 +24,32 @@ test('子进程请求到达硬超时后终止，而不是永久等待', async ()
   await assert.rejects(
     child.receive({ timeoutMs: 30, code: 'TEST_TIMEOUT' }),
     error => error instanceof Error && 'code' in error && error.code === 'TEST_TIMEOUT',
+  )
+  await child.close({ type: 'close' })
+})
+
+test('caller cancellation 会终止在途子进程等待', async () => {
+  const child = new JsonLineProcess(
+    process.execPath,
+    ['-e', 'process.stdin.resume()'],
+    process.env,
+    'cancelled-worker',
+  )
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(), 20)
+  await assert.rejects(
+    child.receive({
+      timeoutMs: 2_000,
+      code: 'TEST_TIMEOUT',
+      stateCertainty: 'uncertain',
+      signal: controller.signal,
+    }),
+    error =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'PROCESS_ABORTED' &&
+      'stateCertainty' in error &&
+      error.stateCertainty === 'uncertain',
   )
   await child.close({ type: 'close' })
 })
@@ -77,22 +103,24 @@ test('preflight 校验精确容器身份、镜像、握手和任务固定版本'
   )
 })
 
-test('Trace 前置断言失败时绝不能先记录 success Outcome', () => {
+test('Trace 前置断言失败时绝不能封账 success Outcome', () => {
   const events = [
     { type: 'llm.requested' },
     { type: 'llm.responded' },
     { type: 'tool.requested' },
   ] as Event[]
-  const checks = traceChecksBeforeOutcome(events, 1, 1)
+  const checks = traceChecksBeforeFinalization(events, 1, 1)
   assert.equal(checks.every(check => check.passed), false)
-  assert.equal(decideOutcome(checks, false), 'failure')
-  assert.equal(decideOutcome([{ id: 'ok', passed: true }], true), 'unknown')
+  assert.equal(decideFinalOutcome(checks, 'verifier_succeeded'), 'failure')
+  assert.equal(decideFinalOutcome([{ id: 'ok', passed: true }], 'cancelled'), 'unknown')
+  assert.equal(decideFinalOutcome([{ id: 'ok', passed: true }], 'wall_budget_exhausted'), 'failure')
+  assert.equal(decideFinalOutcome([{ id: 'ok', passed: true }], 'environment_failed'), 'failure')
 })
 
 test('执行器在启动进程前拒绝 stale episode revision 和错误 pins', async () => {
   const pins: RunPins = {
     model: 'test-model',
-    harness: 'factorio-rlm/v2',
+    harness: 'factorio-rlm/v3',
     kernelProtocol: '2',
     bindingSet: 'factorio/v2',
     renderer: 'markdown-json/v1',
@@ -158,7 +186,7 @@ test('success gate 拒绝断裂的 stepIndex 和 State Ref 链', () => {
       stderrPreview: '', stdoutTruncated: false, stderrTruncated: false,
       namespace: [], managedObjects: [observation, state0],
       factorioEffect: {
-        method: 'reset', episodeId: 'e', stepIndex: 0, commandId: 'e:0',
+        method: 'reset', episodeId: 'e', stepIndex: 0, commandId: 'e:command:0',
         observationRef: observation, outputStateRef: state0, actionCapabilities: [],
         observation: {}, reward: 0, terminated: false, truncated: false,
         verification: { success: false, meta: [] },
@@ -172,7 +200,7 @@ test('success gate 拒绝断裂的 stepIndex 和 State Ref 链', () => {
       stderrPreview: '', stdoutTruncated: false, stderrTruncated: false,
       namespace: [], managedObjects: [observation, state2],
       factorioEffect: {
-        method: 'step', episodeId: 'e', stepIndex: 2, commandId: 'e:2',
+        method: 'step', episodeId: 'e', stepIndex: 2, commandId: 'e:command:1',
         inputStateRef: { ...state0, hash: 'sha256:wrong' }, observationRef: observation,
         outputStateRef: state2, actionCapabilities: [], observation: {}, reward: 0,
         terminated: false, truncated: false, verification: { success: false, meta: [] },
