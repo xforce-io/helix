@@ -212,6 +212,6 @@ CLI 维持现有命令；Live 固定默认墙钟上限 30 分钟，Replay safety
 
 ## 13. 关联
 
-- Issue #3 · L1 comment · Issue #1 · PR #2
+- Issue #3 · L1 comment · PR #4 · Issue #1 · PR #2
 - milkie #227 · #228 · #229
 - `docs/design/1-rlm-factorio-harness.md` · `src/factorio/`
