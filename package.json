@@ -20,6 +20,7 @@
     "factorio:cluster:stop": "uv run --project examples/factorio python examples/factorio/cluster.py stop",
     "verify:factorio:live-smoke": "uv run --project examples/factorio python examples/factorio/verify_live.py",
     "verify:factorio:live": "tsx src/factorio/live.ts",
+    "verify:factorio:live:session": "HELIX_SESSION_ASYNC=1 tsx src/factorio/live.ts",
     "verify:factorio:replay": "tsx src/factorio/replay.ts"
   },
   "engines": {

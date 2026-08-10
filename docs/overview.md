@@ -12,6 +12,21 @@ Approved designs:
 [Issue #5 L2](./design/5-kernel-recursive-model-call.md) ·
 [Issue #7 L2](./design/7-session-subagent-mailbox.md).
 
+## Examples policy
+
+Helix will host **many** examples over time. Domain rule:
+
+- **Factorio-related** paths, scripts, and acceptance stay **cohesive** in the
+  Factorio example family (`examples/factorio` + `src/factorio`). One example may
+  expose multiple paths (default FLE agent run, opt-in session/async, smoke).
+- **Non-Factorio** scenarios get **separate** top-level examples; do not force
+  them into the Factorio tree.
+- Examples are not the public Helix Runtime API unless a design explicitly
+  promotes a contract.
+
+See [examples/factorio/README.md](../examples/factorio/README.md) for paths P0–P2,
+flags (`HELIX_SESSION_ASYNC`), and known residuals.
+
 ## Purpose
 
 Helix provides a Prime Agent-style, model-owned execution harness on top of
