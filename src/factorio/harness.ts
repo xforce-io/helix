@@ -167,11 +167,24 @@ function contextEnvelope(
   recursiveEnabled: boolean,
   maxRecursiveCalls: number,
   maxCompletionTokens: number,
+  sessionAsync?: {
+    enabled: boolean
+    maxActiveHandles: number
+    remainingActiveHandleSlots: number
+    maxHandlesPerSession: number
+    remainingHistoricalHandleSlots: number
+    maxMailboxDepth: number
+    maxMailboxMsgBytes: number
+    sessionId: string | null
+    sessionVersion: number | null
+  },
 ): Record<string, unknown> {
   const lastCell = projection.cells.at(-1)
   const remainingCalls = Math.max(0, maxRecursiveCalls - projection.recursiveCallCount)
+  const schema =
+    pins.sessionAsyncVersion === '1' ? 'helix.context/v4' : 'helix.context/v3'
   return {
-    schema: 'helix.context/v3',
+    schema,
     runtime: {
       runId: projection.runId,
       episodeId: projection.episodeId,
@@ -197,6 +210,7 @@ function contextEnvelope(
         remainingTokens: projection.remainingRecursiveModelTokens,
         maxCompletionTokens,
       },
+      ...(sessionAsync ? { sessionAsync } : {}),
       factorioActionCalls: projection.actionCapabilities ?? [],
     },
     episode: {
@@ -234,6 +248,14 @@ function contextEnvelope(
       remainingWallMs,
       remainingRecursiveModelCalls: remainingCalls,
       remainingRecursiveModelTokens: projection.remainingRecursiveModelTokens,
+      ...(sessionAsync
+        ? {
+            remainingSessionTokens: projection.remainingSessionTokens ?? 0,
+            remainingActiveHandleSlots: sessionAsync.remainingActiveHandleSlots,
+            remainingHistoricalHandleSlots:
+              sessionAsync.remainingHistoricalHandleSlots,
+          }
+        : {}),
     },
   }
 }

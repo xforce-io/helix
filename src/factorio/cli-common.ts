@@ -14,6 +14,8 @@ export const ARTIFACT_ROOT = path.resolve('artifacts/factorio')
 export const TRACE_ROOT = path.join(ARTIFACT_ROOT, 'traces')
 export const OBJECT_ROOT = path.join(ARTIFACT_ROOT, 'objects')
 export const FINALIZATION_ROOT = path.join(ARTIFACT_ROOT, 'final-outcomes')
+/** Durable Helix session ledger/checkpoint root (Issue #7). */
+export const SESSION_STORE_ROOT = path.join(ARTIFACT_ROOT, 'sessions')
 export const LIVE_WALL_TIMEOUT_MS = 30 * 60 * 1_000
 export const REPLAY_WALL_TIMEOUT_MS = 5 * 60 * 1_000
 export const MILKIE_COMMIT = 'd74128cf3ac976ebd68eb1b87f340574811c6366'
@@ -52,6 +54,32 @@ export function requireModel(): string {
 }
 
 export function pins(model: string): RunPins {
+  // Default #5-compatible path (no session-async pin).
+  return pinsV4(model)
+}
+
+/** Issue #7 session-async pins (harness v5 + sessionAsyncVersion). */
+export function pinsSessionAsync(model: string): RunPins {
+  return {
+    model,
+    harness: 'factorio-rlm/v5',
+    kernelProtocol: '2',
+    bindingSet: 'factorio/v4',
+    renderer: 'markdown-json/v1',
+    isolationProfile: 'local-process-ast/v2',
+    milkie: MILKIE_COMMIT,
+    fle: '0.4.3',
+    factorioServer: '2.0.73',
+    taskId: 'iron_ore_throughput',
+    taskDigest: TASK_DIGEST,
+    kernelMemoryBytes: 1_073_741_824,
+    kernelCpuSeconds: 600,
+    sessionAsyncVersion: '1',
+  }
+}
+
+/** v4 pins factory retained for legacy gate tests. */
+export function pinsV4(model: string): RunPins {
   return {
     model,
     harness: 'factorio-rlm/v4',

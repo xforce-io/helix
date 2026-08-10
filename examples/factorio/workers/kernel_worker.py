@@ -305,6 +305,244 @@ class HelixModelsBinding:
         return False
 
 
+
+def _effect_rpc(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Send effect_request and return result object (ok:true) or raise on protocol error."""
+    send(
+        {
+            "protocolVersion": PROTOCOL_VERSION,
+            "type": "effect_request",
+            "method": method,
+            "params": params,
+        }
+    )
+    response = receive()
+    if response.get("type") != "effect_response":
+        raise RuntimeError(f"invalid effect response frame for {method}")
+    if not response.get("ok"):
+        error = response.get("error") or {}
+        raise RuntimeError(
+            f"{error.get('code', 'EFFECT_ERROR')}: "
+            f"{error.get('message', method + ' failed')}"
+        )
+    result = response.get("result")
+    if result is None:
+        return {}
+    if not isinstance(result, dict):
+        raise RuntimeError(f"{method} result must be an object")
+    return result
+
+
+def _result_occupied_write_path(result: dict[str, Any]) -> bool:
+    """Heuristic: Host occupied slot when result is not a pure admission reject."""
+    error = result.get("error")
+    if isinstance(error, dict) and error.get("code") == "MULTIPLE_EFFECTS_IN_CELL":
+        return True
+    status = result.get("status")
+    if status == "rejected":
+        return False
+    # successful write paths return domain objects without status=rejected
+    if "session_id" in result or "handle_id" in result or "msg_id" in result:
+        return True
+    if "committed_version" in result or "noop" in result:
+        return True
+    # non-null message consume
+    if result.get("msg_seq") is not None and result.get("mailbox_id"):
+        return True
+    return False
+
+
+class HelixSessionBinding:
+    """Kernel-side session binding (capability + opaque tokens)."""
+
+    def __init__(self, effect_gate: "CellEffectGate") -> None:
+        self._gate = effect_gate
+        self._creation_token: str | None = None
+        self._session_token: str | None = None
+        self._session_id: str | None = None
+        self._actor: str = "none"
+        self._handle_id: str | None = None
+
+    def configure(
+        self,
+        *,
+        creation_token: str | None = None,
+        session_token: str | None = None,
+        session_id: str | None = None,
+        actor: str = "none",
+        handle_id: str | None = None,
+    ) -> None:
+        self._creation_token = creation_token
+        self._session_token = session_token
+        self._session_id = session_id
+        self._actor = actor
+        self._handle_id = handle_id
+
+    def create(self, capability_token: str, metadata: Any = None) -> dict[str, Any]:
+        if not isinstance(capability_token, str) or not capability_token:
+            raise TypeError("helix.session.create(capability_token) requires a non-empty string")
+        params: dict[str, Any] = {"capabilityToken": capability_token}
+        if metadata is not None:
+            params["metadata"] = metadata
+        result = _effect_rpc("session.create", params)
+        token = result.get("session_capability_token")
+        if isinstance(token, str) and token:
+            self._session_token = token
+        sid = result.get("session_id")
+        if isinstance(sid, str) and sid:
+            self._session_id = sid
+            self._actor = "parent"
+        if _result_occupied_write_path(result):
+            self._gate.note_effect_attempt()
+        return result
+
+    def resume(
+        self,
+        session_id: str,
+        capability_token: str,
+        version: int | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(session_id, str) or not session_id:
+            raise TypeError("session_id must be a non-empty string")
+        if not isinstance(capability_token, str) or not capability_token:
+            raise TypeError("capability_token must be a non-empty string")
+        params: dict[str, Any] = {
+            "sessionId": session_id,
+            "capabilityToken": capability_token,
+        }
+        if version is not None:
+            params["version"] = version
+        result = _effect_rpc("session.resume", params)
+        if result.get("session_id"):
+            self._session_id = str(result["session_id"])
+            self._session_token = capability_token
+            self._actor = "parent"
+        if _result_occupied_write_path(result):
+            self._gate.note_effect_attempt()
+        return result
+
+    def checkpoint(self, note: str | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if note is not None:
+            params["note"] = note
+        result = _effect_rpc("session.checkpoint", params)
+        if _result_occupied_write_path(result):
+            self._gate.note_effect_attempt()
+        return result
+
+    def lookup(
+        self,
+        session_id: str | None = None,
+        capability_token: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if session_id is not None:
+            params["sessionId"] = session_id
+        if capability_token is not None:
+            params["capabilityToken"] = capability_token
+        # lookup never occupies
+        return _effect_rpc("session.lookup", params)
+
+
+class HelixAgentsBinding:
+    """Kernel-side async sub-agent binding."""
+
+    def __init__(self, effect_gate: "CellEffectGate") -> None:
+        self._gate = effect_gate
+
+    def spawn(
+        self,
+        instructions: str,
+        input: Any = None,
+        max_output_tokens: int | None = None,
+        mailbox: bool = True,
+    ) -> dict[str, Any]:
+        if not isinstance(instructions, str):
+            raise TypeError("helix.agents.spawn(instructions) requires a string")
+        params: dict[str, Any] = {"instructions": instructions, "mailbox": bool(mailbox)}
+        if input is not None:
+            params["input"] = input
+        if max_output_tokens is not None:
+            params["maxOutputTokens"] = max_output_tokens
+        result = _effect_rpc("agents.spawn", params)
+        if _result_occupied_write_path(result):
+            self._gate.note_effect_attempt()
+        return result
+
+    def wait(self, handle_id: str, timeout_ms: int | None = None) -> dict[str, Any]:
+        if not isinstance(handle_id, str) or not handle_id:
+            raise TypeError("handle_id must be a non-empty string")
+        params: dict[str, Any] = {"handleId": handle_id}
+        if timeout_ms is not None:
+            params["timeout_ms"] = timeout_ms
+        result = _effect_rpc("agents.wait", params)
+        if _result_occupied_write_path(result) or result.get("status") not in (None, "rejected"):
+            # wait occupies on blocking path even on timeout
+            err = result.get("error") if isinstance(result.get("error"), dict) else {}
+            code = err.get("code") if isinstance(err, dict) else None
+            if code != "AGENT_AUTH_DENIED" and code != "AGENT_PARAM_INVALID" and code != "AGENT_NOT_FOUND":
+                if result.get("status") != "rejected" or code == "AGENT_WAIT_TIMEOUT":
+                    self._gate.note_effect_attempt()
+        return result
+
+    def poll(self, handle_id: str) -> dict[str, Any]:
+        if not isinstance(handle_id, str) or not handle_id:
+            raise TypeError("handle_id must be a non-empty string")
+        return _effect_rpc("agents.poll", {"handleId": handle_id})
+
+
+class HelixMailboxBinding:
+    """Kernel-side bounded mailbox binding."""
+
+    def __init__(self, effect_gate: "CellEffectGate") -> None:
+        self._gate = effect_gate
+
+    def send(
+        self,
+        to: str,
+        payload: Any,
+        to_handle_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(to, str) or not to:
+            raise TypeError("to must be a non-empty string")
+        params: dict[str, Any] = {"to": to, "payload": payload}
+        if to_handle_id is not None:
+            params["to_handle_id"] = to_handle_id
+        result = _effect_rpc("mailbox.send", params)
+        if _result_occupied_write_path(result):
+            self._gate.note_effect_attempt()
+        return result
+
+    def receive(
+        self,
+        mailbox_id: str | None = None,
+        timeout_ms: int = 0,
+    ) -> dict[str, Any] | None:
+        params: dict[str, Any] = {"timeout_ms": int(timeout_ms)}
+        if mailbox_id is not None:
+            params["mailbox_id"] = mailbox_id
+        result = _effect_rpc("mailbox.receive", params)
+        # occupied when consumed or blocking timeout
+        err = result.get("error") if isinstance(result.get("error"), dict) else None
+        if result.get("msg_id") or (isinstance(err, dict) and err.get("code") == "MAILBOX_RECEIVE_TIMEOUT"):
+            self._gate.note_effect_attempt()
+        if result.get("message") is None and result.get("msg_id") is None:
+            # empty non-blocking
+            if isinstance(err, dict):
+                return result
+            return None
+        return result
+
+    def peek(self, mailbox_id: str | None = None) -> dict[str, Any] | None:
+        params: dict[str, Any] = {}
+        if mailbox_id is not None:
+            params["mailbox_id"] = mailbox_id
+        result = _effect_rpc("mailbox.peek", params)
+        if result.get("message") is None and result.get("msg_id") is None:
+            return None
+        return result
+
+
 class CellEffectGate:
     """Shared local (non-authoritative) single-effect counter for UX."""
 
@@ -406,6 +644,9 @@ def main() -> None:
     effect_gate = CellEffectGate()
     factorio = FactorioBinding(effect_gate)
     models = HelixModelsBinding(effect_gate)
+    session = HelixSessionBinding(effect_gate)
+    agents = HelixAgentsBinding(effect_gate)
+    mailbox = HelixMailboxBinding(effect_gate)
     revision = 0
 
     while True:
@@ -475,6 +716,9 @@ def main() -> None:
         capabilities = bootstrap.get("capabilities") or {}
         recursive_cap = capabilities.get("recursiveModel") or {}
         recursive_enabled = bool(recursive_cap.get("enabled", False))
+        session_async_cap = capabilities.get("sessionAsync") or {}
+        session_async_enabled = bool(session_async_cap.get("enabled", False))
+        session_boot = bootstrap.get("session") or {}
 
         helix_ns: dict[str, Any] = {
             "task": bootstrap.get("task"),
@@ -482,6 +726,17 @@ def main() -> None:
         }
         if recursive_enabled:
             helix_ns["models"] = models
+        if session_async_enabled:
+            session.configure(
+                creation_token=session_boot.get("creationToken"),
+                session_token=session_boot.get("sessionToken"),
+                session_id=session_boot.get("sessionId"),
+                actor=str(session_boot.get("actor") or "none"),
+                handle_id=session_boot.get("handleId"),
+            )
+            helix_ns["session"] = session
+            helix_ns["agents"] = agents
+            helix_ns["mailbox"] = mailbox
         shell.user_ns["factorio"] = factorio
         shell.user_ns["helix"] = SimpleNamespace(**helix_ns)
         captured_stdout = BoundedTextBuffer(MAX_OUTPUT_CHARS)
