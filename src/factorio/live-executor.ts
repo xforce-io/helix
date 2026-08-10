@@ -1,11 +1,43 @@
 import path from 'node:path'
-import type { ITraceObjectStore } from 'milkie'
+import type { ITraceObjectStore, ModelRequest, ModelResponse } from 'milkie'
+import type { IOInvocationControl } from 'milkie'
+import type { IIOPort } from 'milkie/dist/runtime/IOPort.js'
 import { byteLength, canonicalJson, digest } from './canonical.js'
 import { JsonLineProcess } from './line-process.js'
+import {
+  allocateChildRunId,
+  applyReserve,
+  buildRejectedResult,
+  buildSucceededResult,
+  DEFAULT_PARENT_RECURSIVE_TOKEN_POOL,
+  decideReserve,
+  emptyReservation,
+  extractResponseText,
+  mapProviderError,
+  MAX_RECURSIVE_CALLS_PER_RUN,
+  MAX_RECURSIVE_COMPLETION_TOKENS,
+  modelEffectFromResult,
+  MODEL_RESPONSE_KIND,
+  MODEL_RESPONSE_SCHEMA,
+  prepareRecursiveAdmission,
+  RECURSIVE_CHILD_AGENT_ID,
+  RECURSIVE_TEMPERATURE,
+  refundReserve,
+  reservationFromDeclared,
+  resultToWire,
+  settleReserve,
+  truncateGoal,
+  truncatePreview,
+} from './recursive-model.js'
+import type { DeclaredLimits, PreparedRecursiveAdmission } from './recursive-model.js'
 import type {
   CellExecutionRecord,
   FactorioEffect,
+  ModelBudgetPool,
+  ModelBudgetSettlement,
+  ModelEffect,
   ObjectRef,
+  RecursiveModelResult,
   RunPins,
   TaskVerification,
 } from './types.js'
@@ -30,8 +62,82 @@ interface BridgeResult {
   actionCapabilities: string[]
 }
 
+export interface ChildPortHandle {
+  port: IIOPort
+  /** True once agent.run.started / attach has been observed. */
+  attached: boolean
+  detach: (payload: {
+    status: 'completed' | 'interrupted' | 'error'
+    lastTextOutput?: string
+    error?: string
+  }) => Promise<void>
+}
+
+export type ChildPortFactory = (args: {
+  childRunId: string
+  parentRunId: string
+  episodeId: string
+  goal: string
+  input: string
+  agentId: string
+}) => Promise<ChildPortHandle>
+
+export interface LiveCellExecutorOptions {
+  recursiveModelEnabled?: boolean
+  recursiveTokenPool?: number
+  maxRecursiveCalls?: number
+  childPortFactory?: ChildPortFactory
+  /** Injected parent absolute control for child invokeLLM. */
+  control?: IOInvocationControl
+  /**
+   * Test seam: force attach branch.
+   * - 'never-started' → C1
+   * - 'post-started' → C2 (attached then fail before LLM)
+   */
+  attachFault?: 'never-started' | 'post-started'
+  /**
+   * Test seam: throw after prepareRecursiveAdmission succeeds (I4 INTERNAL path).
+   * Used to prove catch preserves digest/declared* before atomic commit.
+   */
+  internalFaultAfterPrepare?: boolean
+  /**
+   * Test seam: throw after child invokeLLM returns a terminal response,
+   * before response object-store / final settlement packaging.
+   * Proves post-invoke INTERNAL settles actual usage and detaches once.
+   */
+  internalFaultAfterInvoke?: boolean
+}
+
+/** Mutable stage tracker for post-prepare INTERNAL / unexpected failure handling. */
+function readUsageTokens(
+  error: unknown,
+  field: 'inputTokens' | 'outputTokens',
+): number {
+  if (!error || typeof error !== 'object' || !('usage' in error)) return 0
+  const usageValue = error.usage
+  if (!usageValue || typeof usageValue !== 'object') return 0
+  const record = usageValue as Record<string, unknown>
+  const value = record[field]
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+interface ModelsCallStage {
+  committed: boolean
+  declared?: DeclaredLimits
+  reserve: number
+  remainingBeforeSettle: number
+  childRunId?: string
+  handle?: ChildPortHandle
+  observedStarted: boolean
+  invokedLlm: boolean
+  terminalUsage?: { inputTokens: number; outputTokens: number }
+  settled: boolean
+  detached: boolean
+}
+
 const FLE_STEP_TIMEOUT_MS = 120_000
 const KERNEL_CELL_TIMEOUT_MS = 130_000
+
 
 function workerEnvironment(): NodeJS.ProcessEnv {
   const allowed = ['PATH', 'LANG', 'LC_ALL', 'PORT_OFFSET', 'FLE_STATE_DIR'] as const
@@ -169,6 +275,16 @@ async function putTextObject(
   }
 }
 
+function sanitizeModelResponse(response: ModelResponse): Record<string, unknown> {
+  return {
+    content: response.content,
+    toolCalls: response.toolCalls,
+    usage: response.usage ?? null,
+    finishReason: response.finishReason ?? null,
+    // raw intentionally stripped — secrets / SDK body stay out of object store
+  }
+}
+
 export class LiveCellExecutor {
   private kernel: JsonLineProcess | undefined
   private bridge: JsonLineProcess | undefined
@@ -178,6 +294,26 @@ export class LiveCellExecutor {
   private stateRef: ObjectRef | undefined
   private resetCount = 0
   private stepCount = 0
+  private hostEffectOccupied = false
+  private recursiveOrdinal = 0
+  private readonly budgetPool: ModelBudgetPool
+  private readonly maxRecursiveCalls: number
+  private readonly recursiveModelEnabled: boolean
+  private control: IOInvocationControl | undefined
+  private childPortFactory: ChildPortFactory | undefined
+  private attachFault: LiveCellExecutorOptions['attachFault']
+  private internalFaultAfterPrepare: boolean
+  private internalFaultAfterInvoke: boolean
+  /** In-flight post-prepare stage for INTERNAL catch (not concurrent). */
+  private activeModelsCallStage: ModelsCallStage | undefined
+  private pendingControlTermination: 'cancelled' | 'wall_budget_exhausted' | undefined
+
+  /** Observed started/attached child run ids (success + C2). */
+  readonly childRunIds: string[] = []
+  /** C1 never-started ids. */
+  readonly nonReplayableChildRunIds: string[] = []
+  /** Live Provider invokeLLM count on recursive path (for S3 assertions). */
+  recursiveProviderCalls = 0
 
   kernelStartCount = 0
   bridgeStartCount = 0
@@ -188,7 +324,58 @@ export class LiveCellExecutor {
     private readonly episodeId: string,
     private readonly pins: RunPins,
     private readonly objectStore: ITraceObjectStore,
-  ) {}
+    options: LiveCellExecutorOptions = {},
+  ) {
+    const initial =
+      options.recursiveTokenPool ?? DEFAULT_PARENT_RECURSIVE_TOKEN_POOL
+    this.budgetPool = {
+      initialTokens: initial,
+      remainingTokens: initial,
+      recursiveCallCount: 0,
+      settlements: [],
+      openRecursiveCalls: [],
+    }
+    this.maxRecursiveCalls = options.maxRecursiveCalls ?? MAX_RECURSIVE_CALLS_PER_RUN
+    this.recursiveModelEnabled = options.recursiveModelEnabled !== false
+    this.control = options.control
+    this.childPortFactory = options.childPortFactory
+    this.attachFault = options.attachFault
+    this.internalFaultAfterPrepare = options.internalFaultAfterPrepare === true
+    this.internalFaultAfterInvoke = options.internalFaultAfterInvoke === true
+  }
+
+  setControl(control: IOInvocationControl | undefined): void {
+    this.control = control
+  }
+
+  getBudgetPool(): ModelBudgetPool {
+    return {
+      initialTokens: this.budgetPool.initialTokens,
+      remainingTokens: this.budgetPool.remainingTokens,
+      recursiveCallCount: this.budgetPool.recursiveCallCount,
+      settlements: [...this.budgetPool.settlements],
+      ...(this.budgetPool.openRecursiveCalls
+        ? { openRecursiveCalls: [...this.budgetPool.openRecursiveCalls] }
+        : {}),
+    }
+  }
+
+  /** Test/harness seam: swap child port factory between cells. */
+  setChildPortFactory(factory: ChildPortFactory | undefined): void {
+    this.childPortFactory = factory
+  }
+
+  /** Test seam: clear per-cell host effect gate between cells. */
+  resetHostEffectOccupied(): void {
+    this.hostEffectOccupied = false
+  }
+
+  getRecursiveControlTermination():
+    | 'cancelled'
+    | 'wall_budget_exhausted'
+    | undefined {
+    return this.pendingControlTermination
+  }
 
   private pythonExecutable(): string {
     return (
@@ -255,10 +442,699 @@ export class LiveCellExecutor {
     return response['result'] as unknown as BridgeResult
   }
 
-  private async handleEffect(
+  private recordSettlement(settlement: ModelBudgetSettlement): void {
+    this.budgetPool.settlements.push(settlement)
+  }
+
+  private removeOpenCall(childRunId: string): void {
+    if (!this.budgetPool.openRecursiveCalls) return
+    this.budgetPool.openRecursiveCalls = this.budgetPool.openRecursiveCalls.filter(
+      item => item.childRunId !== childRunId,
+    )
+  }
+
+  /**
+   * Host-authoritative models.call path (L2 §6.2).
+   * Always returns ok:true + RecursiveModelResult for parseable frames (IMP-B).
+   */
+  private async handleModelsCall(
+    frame: Record<string, unknown>,
+    cellId: string,
+    signal?: AbortSignal,
+  ): Promise<{ result: RecursiveModelResult; modelEffect: ModelEffect }> {
+    const params = asRecord(frame['params'])
+    const admissionInput = Object.prototype.hasOwnProperty.call(params, 'input')
+      ? params['input']
+      : undefined
+    const prepared = prepareRecursiveAdmission({
+      instructions: params['instructions'],
+      input: admissionInput,
+      maxOutputTokens: params['maxOutputTokens'],
+      remainingTokens: this.budgetPool.remainingTokens,
+      model: this.pins.model,
+    })
+
+    // Step 1 fail: param/canonical — no digest (I4 partition 2).
+    if (!prepared.ok) {
+      return { result: prepared.result, modelEffect: prepared.modelEffect }
+    }
+
+    // Stage tracker for post-prepare INTERNAL: settle/detach by phase, never blind refund.
+    const stage: ModelsCallStage = {
+      committed: false,
+      reserve: 0,
+      remainingBeforeSettle: 0,
+      observedStarted: false,
+      invokedLlm: false,
+      settled: false,
+      detached: false,
+    }
+    this.activeModelsCallStage = stage
+    try {
+      return await this.handleModelsCallAfterPrepare(
+        prepared,
+        admissionInput,
+        cellId,
+        signal,
+        stage,
+      )
+    } catch (error) {
+      return await this.buildInternalFailureFromPrepared(
+        prepared,
+        admissionInput,
+        error,
+        stage,
+      )
+    } finally {
+      this.activeModelsCallStage = undefined
+    }
+  }
+
+  private async handleModelsCallAfterPrepare(
+    prepared: PreparedRecursiveAdmission,
+    admissionInput: unknown,
+    cellId: string,
+    signal: AbortSignal | undefined,
+    stage: ModelsCallStage,
+  ): Promise<{ result: RecursiveModelResult; modelEffect: ModelEffect }> {
+    if (this.internalFaultAfterPrepare) {
+      throw new Error('injected internal fault after prepare')
+    }
+    const requestEcho = {
+      instructions: prepared.instructions,
+      ...(admissionInput === undefined ? {} : { input: admissionInput }),
+      model: this.pins.model,
+    }
+    const toModelEffect = (result: RecursiveModelResult): ModelEffect =>
+      modelEffectFromResult(result, requestEcho)
+
+    const rejectWithDigest = (
+      code: Parameters<typeof buildRejectedResult>[0]['code'],
+      message: string,
+    ): { result: RecursiveModelResult; modelEffect: ModelEffect } => {
+      const result = buildRejectedResult({
+        code,
+        message,
+        reservation: reservationFromDeclared(prepared.declared),
+        requestDigest: prepared.requestDigest,
+      })
+      const modelEffect = toModelEffect(result)
+      this.recordSettlement({
+        reservedTokens: 0,
+        declaredPromptTokens: prepared.declared.declaredPromptTokens,
+        declaredCompletionTokens: prepared.declared.declaredCompletionTokens,
+        requestedCompletionTokens: prepared.declared.requestedCompletionTokens,
+        actualUsageTokens: 0,
+        chargedTokens: 0,
+        overflowTokens: 0,
+        status: 'rejected',
+        requestDigest: prepared.requestDigest,
+      })
+      return { result, modelEffect }
+    }
+
+    // Step 3: occupied gate (IMP-B → ok:true + rejected)
+    if (this.hostEffectOccupied) {
+      return rejectWithDigest(
+        'MULTIPLE_EFFECTS_IN_CELL',
+        'one external effect per cell',
+      )
+    }
+
+    // Step 4: capability
+    if (!this.recursiveModelEnabled) {
+      return rejectWithDigest(
+        'RECURSIVE_MODEL_NOT_ENABLED',
+        'recursive model capability is not enabled',
+      )
+    }
+
+    // Step 5: call count
+    if (this.budgetPool.recursiveCallCount >= this.maxRecursiveCalls) {
+      return rejectWithDigest(
+        'RECURSIVE_CALL_LIMIT_EXCEEDED',
+        `recursive call limit ${this.maxRecursiveCalls} exceeded`,
+      )
+    }
+
+    // Step 6: budget clamp gate (live remaining)
+    const reserveDecision = decideReserve({
+      instructionsByteLength: prepared.instructionsBytes.byteLength,
+      inputByteLength: prepared.inputByteLength,
+      maxOutputTokens: prepared.declared.requestedCompletionTokens,
+      remainingTokens: this.budgetPool.remainingTokens,
+    })
+    const declared = reserveDecision.declared
+    // Digest is bound to declaredCompletionTokens; prepare used the same remaining.
+    const requestDigest = prepared.requestDigest
+    if (!reserveDecision.ok) {
+      const result = buildRejectedResult({
+        code: 'RECURSIVE_BUDGET_INSUFFICIENT',
+        message:
+          reserveDecision.reason === 'prompt_exceeds_pool'
+            ? 'declared prompt exceeds remaining pool'
+            : 'reserve below minimum after clamp',
+        reservation: reservationFromDeclared(declared),
+        requestDigest,
+      })
+      this.recordSettlement({
+        reservedTokens: 0,
+        declaredPromptTokens: declared.declaredPromptTokens,
+        declaredCompletionTokens: declared.declaredCompletionTokens,
+        requestedCompletionTokens: declared.requestedCompletionTokens,
+        actualUsageTokens: 0,
+        chargedTokens: 0,
+        overflowTokens: 0,
+        status: 'rejected',
+        requestDigest,
+      })
+      return { result, modelEffect: toModelEffect(result) }
+    }
+
+    // Step 7: atomic commit — occupy + reserve + count + allocate id
+    const reserve = declared.reserve
+    this.budgetPool.remainingTokens = applyReserve(
+      this.budgetPool.remainingTokens,
+      reserve,
+    )
+    this.budgetPool.recursiveCallCount += 1
+    this.hostEffectOccupied = true
+    this.effectCount += 1
+    const ordinal = this.recursiveOrdinal++
+    const childRunId = allocateChildRunId(this.runId, ordinal)
+    this.budgetPool.openRecursiveCalls = [
+      ...(this.budgetPool.openRecursiveCalls ?? []),
+      {
+        childRunId,
+        reserve,
+        declaredPromptTokens: declared.declaredPromptTokens,
+        declaredCompletionTokens: declared.declaredCompletionTokens,
+        requestedCompletionTokens: declared.requestedCompletionTokens,
+      },
+    ]
+
+    const remainingBeforeSettle = this.budgetPool.remainingTokens
+    stage.committed = true
+    stage.declared = declared
+    stage.reserve = reserve
+    stage.remainingBeforeSettle = remainingBeforeSettle
+    stage.childRunId = childRunId
+
+    // Attach (IMP-A)
+    if (this.attachFault === 'never-started') {
+      const settlement = refundReserve(remainingBeforeSettle, reserve)
+      this.budgetPool.remainingTokens = settlement.remainingAfter
+      this.removeOpenCall(childRunId)
+      stage.settled = true
+      this.nonReplayableChildRunIds.push(childRunId)
+      const result = buildRejectedResult({
+        code: 'RECURSIVE_CHILD_ATTACH_FAILED',
+        message: 'child run attach never started',
+        childRunId,
+        attachFailed: true,
+        requestDigest: prepared.requestDigest,
+        reservation: reservationFromDeclared(declared, {
+          reservedTokens: 0,
+          actualUsageTokens: 0,
+          chargedTokens: 0,
+          overflowTokens: 0,
+        }),
+      })
+      this.recordSettlement({
+        childRunId,
+        reservedTokens: 0,
+        declaredPromptTokens: declared.declaredPromptTokens,
+        declaredCompletionTokens: declared.declaredCompletionTokens,
+        requestedCompletionTokens: declared.requestedCompletionTokens,
+        actualUsageTokens: 0,
+        chargedTokens: 0,
+        overflowTokens: 0,
+        status: 'failed',
+        requestDigest: prepared.requestDigest,
+        attachFailed: true,
+      })
+      return { result, modelEffect: toModelEffect(result) }
+    }
+
+    if (!this.childPortFactory) {
+      // No factory configured → treat as C1 never-started (no Provider).
+      const settlement = refundReserve(remainingBeforeSettle, reserve)
+      this.budgetPool.remainingTokens = settlement.remainingAfter
+      this.removeOpenCall(childRunId)
+      stage.settled = true
+      this.nonReplayableChildRunIds.push(childRunId)
+      const result = buildRejectedResult({
+        code: 'RECURSIVE_CHILD_ATTACH_FAILED',
+        message: 'child port factory is not configured',
+        childRunId,
+        attachFailed: true,
+        requestDigest: prepared.requestDigest,
+        reservation: reservationFromDeclared(declared, {
+          reservedTokens: 0,
+        }),
+      })
+      this.recordSettlement({
+        childRunId,
+        reservedTokens: 0,
+        declaredPromptTokens: declared.declaredPromptTokens,
+        declaredCompletionTokens: declared.declaredCompletionTokens,
+        requestedCompletionTokens: declared.requestedCompletionTokens,
+        actualUsageTokens: 0,
+        chargedTokens: 0,
+        overflowTokens: 0,
+        status: 'failed',
+        requestDigest: prepared.requestDigest,
+        attachFailed: true,
+      })
+      return { result, modelEffect: toModelEffect(result) }
+    }
+
+    let handle: ChildPortHandle | undefined
+    let observedStarted = false
+    try {
+      handle = await this.childPortFactory({
+        childRunId,
+        parentRunId: this.runId,
+        episodeId: this.episodeId,
+        goal: truncateGoal(prepared.instructions),
+        input: prepared.requestDigest,
+        agentId: RECURSIVE_CHILD_AGENT_ID,
+      })
+      observedStarted = handle.attached === true
+      stage.handle = handle
+      stage.observedStarted = observedStarted
+    } catch (error) {
+      // Attach threw before started observation → C1
+      const settlement = refundReserve(remainingBeforeSettle, reserve)
+      this.budgetPool.remainingTokens = settlement.remainingAfter
+      this.removeOpenCall(childRunId)
+      stage.settled = true
+      this.nonReplayableChildRunIds.push(childRunId)
+      const result = buildRejectedResult({
+        code: 'RECURSIVE_CHILD_ATTACH_FAILED',
+        message: String(
+          error instanceof Error ? error.message : 'child run attach never started',
+        ).slice(0, 512),
+        childRunId,
+        attachFailed: true,
+        requestDigest: prepared.requestDigest,
+        reservation: reservationFromDeclared(declared, { reservedTokens: 0 }),
+      })
+      this.recordSettlement({
+        childRunId,
+        reservedTokens: 0,
+        declaredPromptTokens: declared.declaredPromptTokens,
+        declaredCompletionTokens: declared.declaredCompletionTokens,
+        requestedCompletionTokens: declared.requestedCompletionTokens,
+        actualUsageTokens: 0,
+        chargedTokens: 0,
+        overflowTokens: 0,
+        status: 'failed',
+        requestDigest: prepared.requestDigest,
+        attachFailed: true,
+      })
+      return { result, modelEffect: toModelEffect(result) }
+    }
+
+    if (!observedStarted) {
+      // Factory returned without attach confirmation → C1
+      // I2: attached=false ⇒ do NOT detach (never-started has no started lifecycle).
+      const settlement = refundReserve(remainingBeforeSettle, reserve)
+      this.budgetPool.remainingTokens = settlement.remainingAfter
+      this.removeOpenCall(childRunId)
+      stage.settled = true
+      this.nonReplayableChildRunIds.push(childRunId)
+      const result = buildRejectedResult({
+        code: 'RECURSIVE_CHILD_ATTACH_FAILED',
+        message: 'child run attach never started',
+        childRunId,
+        attachFailed: true,
+        requestDigest: prepared.requestDigest,
+        reservation: reservationFromDeclared(declared, { reservedTokens: 0 }),
+      })
+      this.recordSettlement({
+        childRunId,
+        reservedTokens: 0,
+        declaredPromptTokens: declared.declaredPromptTokens,
+        declaredCompletionTokens: declared.declaredCompletionTokens,
+        requestedCompletionTokens: declared.requestedCompletionTokens,
+        actualUsageTokens: 0,
+        chargedTokens: 0,
+        overflowTokens: 0,
+        status: 'failed',
+        requestDigest: prepared.requestDigest,
+        attachFailed: true,
+      })
+      return { result, modelEffect: toModelEffect(result) }
+    }
+
+    // Observed started → id enters childRunIds (success path or C2)
+    this.childRunIds.push(childRunId)
+
+    if (this.attachFault === 'post-started') {
+      try {
+        await handle.detach({ status: 'error', error: 'post-attach failure before LLM' })
+      } catch {
+        // detach once best-effort
+      }
+      stage.detached = true
+      const settlement = refundReserve(remainingBeforeSettle, reserve)
+      this.budgetPool.remainingTokens = settlement.remainingAfter
+      this.removeOpenCall(childRunId)
+      stage.settled = true
+      const result = buildRejectedResult({
+        code: 'RECURSIVE_CHILD_POST_ATTACH_FAILED',
+        message: 'post-attach failure before LLM',
+        childRunId,
+        requestDigest: prepared.requestDigest,
+        reservation: reservationFromDeclared(declared, { reservedTokens: 0 }),
+      })
+      // ensure attachFailed is not true
+      delete (result as { attachFailed?: boolean }).attachFailed
+      this.recordSettlement({
+        childRunId,
+        reservedTokens: 0,
+        declaredPromptTokens: declared.declaredPromptTokens,
+        declaredCompletionTokens: declared.declaredCompletionTokens,
+        requestedCompletionTokens: declared.requestedCompletionTokens,
+        actualUsageTokens: 0,
+        chargedTokens: 0,
+        overflowTokens: 0,
+        status: 'failed',
+        requestDigest: prepared.requestDigest,
+      })
+      return { result, modelEffect: toModelEffect(result) }
+    }
+
+    // invokeLLM on child
+    const request: ModelRequest = {
+      model: this.pins.model,
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: prepared.userContent }],
+        },
+      ],
+      temperature: RECURSIVE_TEMPERATURE,
+      maxTokens: declared.declaredCompletionTokens,
+      metadata: {
+        parentRunId: this.runId,
+        childRunId,
+        cellId,
+        recursiveOrdinal: ordinal,
+        pinsDigest: digest(this.pins),
+        requestDigest: prepared.requestDigest,
+      },
+    }
+
+    const childControl: IOInvocationControl = {
+      ...(this.control?.deadlineAt === undefined
+        ? {}
+        : { deadlineAt: this.control.deadlineAt }),
+      ...(signal
+        ? { signal }
+        : this.control?.signal
+          ? { signal: this.control.signal }
+          : {}),
+    }
+
+    let response: ModelResponse
+    try {
+      this.recursiveProviderCalls += 1
+      // Mark request-started before await so INTERNAL mid-flight settles as invoked.
+      stage.invokedLlm = true
+      response = await handle.port.invokeLLM(request, {
+        control: childControl,
+      })
+    } catch (error) {
+      const mapped = mapProviderError(error)
+      if (mapped.parentTermination) {
+        this.pendingControlTermination = mapped.parentTermination
+      }
+      const usageInput = readUsageTokens(error, 'inputTokens')
+      const usageOutput = readUsageTokens(error, 'outputTokens')
+      stage.terminalUsage = { inputTokens: usageInput, outputTokens: usageOutput }
+      const settlement = settleReserve({
+        remainingBeforeSettle,
+        reserve,
+        inputTokens: usageInput,
+        outputTokens: usageOutput,
+      })
+      this.budgetPool.remainingTokens = settlement.remainingAfter
+      this.removeOpenCall(childRunId)
+      stage.settled = true
+      try {
+        await handle.detach({
+          status: mapped.status === 'cancelled' ? 'interrupted' : 'error',
+          error: mapped.message,
+        })
+      } catch {
+        // detach once
+      }
+      stage.detached = true
+      const result: RecursiveModelResult = {
+        schema: 'helix.recursive-model-result/v1',
+        status: mapped.status,
+        text: '',
+        textTruncated: false,
+        childRunId,
+        usage:
+          usageInput + usageOutput > 0
+            ? { inputTokens: usageInput, outputTokens: usageOutput }
+            : null,
+        responseRef: null,
+        reservation: reservationFromDeclared(declared, {
+          reservedTokens: reserve,
+          actualUsageTokens: settlement.actualUsageTokens,
+          chargedTokens: settlement.chargedTokens,
+          overflowTokens: settlement.overflowTokens,
+        }),
+        requestDigest: prepared.requestDigest,
+        error: { code: mapped.code, message: mapped.message },
+      }
+      this.recordSettlement({
+        childRunId,
+        reservedTokens: reserve,
+        declaredPromptTokens: declared.declaredPromptTokens,
+        declaredCompletionTokens: declared.declaredCompletionTokens,
+        requestedCompletionTokens: declared.requestedCompletionTokens,
+        actualUsageTokens: settlement.actualUsageTokens,
+        chargedTokens: settlement.chargedTokens,
+        overflowTokens: settlement.overflowTokens,
+        status: mapped.status,
+        requestDigest: prepared.requestDigest,
+      })
+      return { result, modelEffect: toModelEffect(result) }
+    }
+
+    // Success terminal — capture usage before any post-invoke work that may throw.
+    const inputTokens = response.usage?.inputTokens ?? 0
+    const outputTokens = response.usage?.outputTokens ?? 0
+    stage.terminalUsage = { inputTokens, outputTokens }
+
+    if (this.internalFaultAfterInvoke) {
+      throw new Error('injected internal fault after invokeLLM')
+    }
+
+    const sanitized = sanitizeModelResponse(response)
+    const responseRef = await putJsonObject(
+      this.objectStore,
+      sanitized,
+      MODEL_RESPONSE_KIND,
+      MODEL_RESPONSE_SCHEMA,
+    )
+
+    const settlement = settleReserve({
+      remainingBeforeSettle,
+      reserve,
+      inputTokens,
+      outputTokens,
+    })
+    this.budgetPool.remainingTokens = settlement.remainingAfter
+    this.removeOpenCall(childRunId)
+    stage.settled = true
+
+    const fullText = extractResponseText(response)
+    const preview = truncatePreview(fullText)
+    const result = buildSucceededResult({
+      text: preview.text,
+      textTruncated: preview.truncated,
+      childRunId,
+      usage: { inputTokens, outputTokens },
+      responseRef,
+      reservation: reservationFromDeclared(declared, {
+        reservedTokens: reserve,
+        actualUsageTokens: settlement.actualUsageTokens,
+        chargedTokens: settlement.chargedTokens,
+        overflowTokens: settlement.overflowTokens,
+      }),
+      requestDigest: prepared.requestDigest,
+    })
+
+    try {
+      await handle.detach({
+        status: 'completed',
+        lastTextOutput: preview.text.slice(0, 512),
+      })
+    } catch {
+      // detach once best-effort after success
+    }
+    stage.detached = true
+
+    this.recordSettlement({
+      childRunId,
+      reservedTokens: reserve,
+      declaredPromptTokens: declared.declaredPromptTokens,
+      declaredCompletionTokens: declared.declaredCompletionTokens,
+      requestedCompletionTokens: declared.requestedCompletionTokens,
+      actualUsageTokens: settlement.actualUsageTokens,
+      chargedTokens: settlement.chargedTokens,
+      overflowTokens: settlement.overflowTokens,
+      status: 'succeeded',
+      requestDigest: prepared.requestDigest,
+    })
+    return { result, modelEffect: toModelEffect(result) }
+  }
+
+  /**
+   * I4 INTERNAL catch after prepare: keep requestDigest, request echo, declared*.
+   * Settle / detach by stage — never blind-refund openRecursiveCalls after invoke.
+   */
+  private async buildInternalFailureFromPrepared(
+    prepared: PreparedRecursiveAdmission,
+    admissionInput: unknown,
+    error: unknown,
+    stage: ModelsCallStage,
+  ): Promise<{ result: RecursiveModelResult; modelEffect: ModelEffect }> {
+    const structured = error instanceof Error ? error : new Error(String(error))
+    const requestEcho = {
+      instructions: prepared.instructions,
+      ...(admissionInput === undefined ? {} : { input: admissionInput }),
+      model: this.pins.model,
+    }
+    const declared = stage.declared ?? prepared.declared
+    const childRunId = stage.childRunId
+
+    let reservedTokens = 0
+    let actualUsageTokens = 0
+    let chargedTokens = 0
+    let overflowTokens = 0
+    let usage: { inputTokens: number; outputTokens: number } | null = null
+
+    if (!stage.committed) {
+      // Pre-commit: pool untouched; digest/declared retained; reserved=0.
+    } else if (!stage.invokedLlm) {
+      // Commit but no LLM request yet → full refund (C1/C2 pre-LLM semantics).
+      if (!stage.settled) {
+        const settlement = refundReserve(stage.remainingBeforeSettle, stage.reserve)
+        this.budgetPool.remainingTokens = settlement.remainingAfter
+        if (childRunId !== undefined) this.removeOpenCall(childRunId)
+        stage.settled = true
+      }
+      reservedTokens = 0
+      actualUsageTokens = 0
+      chargedTokens = 0
+      overflowTokens = 0
+    } else {
+      // LLM request started → settle actual usage; never full refund that masks usage.
+      const inputTokens = stage.terminalUsage?.inputTokens ?? 0
+      const outputTokens = stage.terminalUsage?.outputTokens ?? 0
+      if (!stage.settled) {
+        const settlement = settleReserve({
+          remainingBeforeSettle: stage.remainingBeforeSettle,
+          reserve: stage.reserve,
+          inputTokens,
+          outputTokens,
+        })
+        this.budgetPool.remainingTokens = settlement.remainingAfter
+        if (childRunId !== undefined) this.removeOpenCall(childRunId)
+        stage.settled = true
+        actualUsageTokens = settlement.actualUsageTokens
+        chargedTokens = settlement.chargedTokens
+        overflowTokens = settlement.overflowTokens
+      } else {
+        const settlement = settleReserve({
+          remainingBeforeSettle: stage.remainingBeforeSettle,
+          reserve: stage.reserve,
+          inputTokens,
+          outputTokens,
+        })
+        actualUsageTokens = settlement.actualUsageTokens
+        chargedTokens = settlement.chargedTokens
+        overflowTokens = settlement.overflowTokens
+      }
+      reservedTokens = stage.reserve
+      if (inputTokens + outputTokens > 0) {
+        usage = { inputTokens, outputTokens }
+      }
+    }
+
+    // C2 lifecycle: started child must be in childRunIds and detached once.
+    if (stage.observedStarted && childRunId !== undefined) {
+      if (!this.childRunIds.includes(childRunId)) {
+        this.childRunIds.push(childRunId)
+      }
+      if (stage.handle && !stage.detached) {
+        try {
+          await stage.handle.detach({
+            status: 'error',
+            error: structured.message.slice(0, 512),
+          })
+        } catch {
+          // detach once best-effort
+        }
+        stage.detached = true
+      }
+    }
+
+    const result: RecursiveModelResult = {
+      schema: 'helix.recursive-model-result/v1',
+      status: 'failed',
+      text: '',
+      textTruncated: false,
+      childRunId: childRunId === undefined ? null : childRunId,
+      usage,
+      responseRef: null,
+      reservation: reservationFromDeclared(declared, {
+        reservedTokens,
+        actualUsageTokens,
+        chargedTokens,
+        overflowTokens,
+      }),
+      requestDigest: prepared.requestDigest,
+      error: {
+        code: 'RECURSIVE_MODEL_INTERNAL',
+        message: structured.message.slice(0, 512),
+      },
+    }
+    this.recordSettlement({
+      ...(childRunId === undefined ? {} : { childRunId }),
+      reservedTokens,
+      declaredPromptTokens: declared.declaredPromptTokens,
+      declaredCompletionTokens: declared.declaredCompletionTokens,
+      requestedCompletionTokens: declared.requestedCompletionTokens,
+      actualUsageTokens,
+      chargedTokens,
+      overflowTokens,
+      status: 'failed',
+      requestDigest: prepared.requestDigest,
+    })
+    return {
+      result,
+      modelEffect: modelEffectFromResult(result, requestEcho),
+    }
+  }
+
+  private async handleFactorioEffect(
     frame: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<{ result: Record<string, unknown>; effect: FactorioEffect }> {
+    if (this.hostEffectOccupied) {
+      throw Object.assign(new Error('one external effect per cell'), {
+        code: 'MULTIPLE_EFFECTS_IN_CELL',
+        stateCertainty: 'unchanged' as const,
+      })
+    }
     const method = frame['method']
     if (method !== 'reset' && method !== 'step') {
       throw Object.assign(new Error(`unknown Factorio effect: ${String(method)}`), {
@@ -279,16 +1155,20 @@ export class LiveCellExecutor {
     const program = method === 'step' ? String(params['program'] ?? '') : undefined
     const inputStateRef = this.stateRef
     const stepIndex = method === 'reset' ? 0 : this.stepCount + 1
-    // A failed bridge command can be safely unchanged while still being recorded by
-    // the idempotency ledger. A later model-authored retry is a new command, even
-    // though it targets the same episode step.
     const commandId = `${this.episodeId}:command:${this.commandOrdinal++}`
-    const bridgeResult = await this.bridgeRequest(method, commandId, {
-      ...(program === undefined ? {} : { program }),
-      ...(method === 'step' && this.stateRaw !== undefined
-        ? { stateRaw: this.stateRaw }
-        : {}),
-    }, signal)
+    const bridgeResult = await this.bridgeRequest(
+      method,
+      commandId,
+      {
+        ...(program === undefined ? {} : { program }),
+        ...(method === 'step' && this.stateRaw !== undefined
+          ? { stateRaw: this.stateRaw }
+          : {}),
+      },
+      signal,
+    )
+    // Bridge admission succeeded → occupy host effect slot
+    this.hostEffectOccupied = true
     this.effectCount += 1
 
     const preview = boundedObservation(bridgeResult.observation)
@@ -367,8 +1247,9 @@ export class LiveCellExecutor {
 
   async execute(input: ExecuteCellInput, signal?: AbortSignal): Promise<CellExecutionRecord> {
     const contractError = (code: string, message: string): CellExecutionRecord => ({
-      schema: 'helix.cell-execution/v1',
+      schema: 'helix.cell-execution/v2',
       cellId: input.cellId,
+      source: input.code,
       sourceDigest: digest(input.code),
       startRevision: input.expectedKernelRevision,
       endRevision: input.expectedKernelRevision,
@@ -391,6 +1272,10 @@ export class LiveCellExecutor {
     if (input.pinsDigest !== digest(this.pins)) {
       return contractError('PINS_DIGEST_MISMATCH', 'execute_cell pins do not match this run')
     }
+
+    // Reset Host effect gate per cell (I2)
+    this.hostEffectOccupied = false
+
     const kernel = this.ensureKernel()
     kernel.send({
       protocolVersion: '2',
@@ -407,9 +1292,21 @@ export class LiveCellExecutor {
           episodeId: this.episodeId,
           pins: this.pins,
         },
+        capabilities: {
+          recursiveModel: {
+            enabled: this.recursiveModelEnabled,
+            remainingCalls: Math.max(
+              0,
+              this.maxRecursiveCalls - this.budgetPool.recursiveCallCount,
+            ),
+            remainingTokens: this.budgetPool.remainingTokens,
+            maxCompletionTokens: MAX_RECURSIVE_COMPLETION_TOKENS,
+          },
+        },
       },
     })
     let factorioEffect: FactorioEffect | undefined
+    let modelEffect: ModelEffect | undefined
     let effectError:
       | (Error & {
           code?: string
@@ -422,7 +1319,8 @@ export class LiveCellExecutor {
         frame = await kernel.receive({
           timeoutMs: KERNEL_CELL_TIMEOUT_MS,
           code: 'KERNEL_TIMEOUT',
-          stateCertainty: factorioEffect ? 'confirmed' : 'unchanged',
+          stateCertainty:
+            factorioEffect || modelEffect ? 'confirmed' : 'unchanged',
           ...(signal === undefined ? {} : { signal }),
         })
       } catch (error) {
@@ -430,9 +1328,16 @@ export class LiveCellExecutor {
           code?: string
           stateCertainty?: 'unchanged' | 'confirmed' | 'uncertain'
         }
+        const managed: ObjectRef[] = []
+        if (factorioEffect) {
+          if (factorioEffect.programRef) managed.push(factorioEffect.programRef)
+          managed.push(factorioEffect.observationRef, factorioEffect.outputStateRef)
+        }
+        if (modelEffect?.responseRef) managed.push(modelEffect.responseRef)
         return {
-          schema: 'helix.cell-execution/v1',
+          schema: 'helix.cell-execution/v2',
           cellId: input.cellId,
+          source: input.code,
           sourceDigest: digest(input.code),
           startRevision: input.expectedKernelRevision,
           endRevision: input.expectedKernelRevision,
@@ -442,27 +1347,100 @@ export class LiveCellExecutor {
           stdoutTruncated: false,
           stderrTruncated: false,
           namespace: [],
-          managedObjects: factorioEffect
-            ? [
-                ...(factorioEffect.programRef ? [factorioEffect.programRef] : []),
-                factorioEffect.observationRef,
-                factorioEffect.outputStateRef,
-              ]
-            : [],
+          managedObjects: managed,
           ...(factorioEffect === undefined ? {} : { factorioEffect }),
+          ...(modelEffect === undefined ? {} : { modelEffect }),
           error: {
             code: structured.code ?? 'KERNEL_RESOURCE_EXHAUSTED',
             message: structured.message,
             stateCertainty:
-              factorioEffect === undefined
+              factorioEffect === undefined && modelEffect === undefined
                 ? (structured.stateCertainty ?? 'unchanged')
                 : 'confirmed',
           },
         }
       }
       if (frame['type'] === 'effect_request') {
+        if (frame['protocolVersion'] !== '2') {
+          kernel.send({
+            type: 'effect_response',
+            ok: false,
+            error: {
+              code: 'KERNEL_PROTOCOL_INVALID',
+              message: `expected protocolVersion "2", got ${String(frame['protocolVersion'])}`,
+            },
+          })
+          continue
+        }
+        const method = frame['method']
+        if (method === 'models.call') {
+          try {
+            const handled = await this.handleModelsCall(frame, input.cellId, signal)
+            // Last models.call wins modelEffect (second call is rejected result).
+            modelEffect = handled.modelEffect
+            kernel.send({
+              type: 'effect_response',
+              ok: true,
+              result: resultToWire(handled.result),
+            })
+          } catch (error) {
+            // Last-ditch safety net: handleModelsCall should already catch
+            // post-prepare failures with digest. If something still escapes,
+            // re-run prepare from the frame so I4 partition is preserved when
+            // param/canonical already succeeded.
+            const params = asRecord(frame['params'])
+            const admissionInput = Object.prototype.hasOwnProperty.call(params, 'input')
+              ? params['input']
+              : undefined
+            const prepared = prepareRecursiveAdmission({
+              instructions: params['instructions'],
+              input: admissionInput,
+              maxOutputTokens: params['maxOutputTokens'],
+              remainingTokens: this.budgetPool.remainingTokens,
+              model: this.pins.model,
+            })
+            if (prepared.ok) {
+              const stage: ModelsCallStage = this.activeModelsCallStage ?? {
+                committed: false,
+                reserve: 0,
+                remainingBeforeSettle: 0,
+                observedStarted: false,
+                invokedLlm: false,
+                settled: false,
+                detached: false,
+              }
+              const handled = await this.buildInternalFailureFromPrepared(
+                prepared,
+                admissionInput,
+                error,
+                stage,
+              )
+              modelEffect = handled.modelEffect
+              kernel.send({
+                type: 'effect_response',
+                ok: true,
+                result: resultToWire(handled.result),
+              })
+            } else {
+              const structured = error instanceof Error ? error : new Error(String(error))
+              const result = buildRejectedResult({
+                code: 'RECURSIVE_MODEL_INTERNAL',
+                message: structured.message.slice(0, 512),
+                reservation: emptyReservation(),
+              })
+              modelEffect = modelEffectFromResult(result)
+              kernel.send({
+                type: 'effect_response',
+                ok: true,
+                result: resultToWire(result),
+              })
+            }
+          }
+          continue
+        }
+        // factorio reset/step
         try {
-          const handled = await this.handleEffect(frame, signal)
+          const handled = await this.handleFactorioEffect(frame, signal)
           factorioEffect = handled.effect
           kernel.send({ type: 'effect_response', ok: true, result: handled.result })
         } catch (error) {
@@ -487,13 +1465,28 @@ export class LiveCellExecutor {
         throw new Error(`unexpected kernel frame: ${JSON.stringify(frame).slice(0, 500)}`)
       }
       const error = asRecord(frame['error'])
+      const managed: ObjectRef[] = []
+      if (factorioEffect) {
+        if (factorioEffect.programRef) managed.push(factorioEffect.programRef)
+        managed.push(factorioEffect.observationRef, factorioEffect.outputStateRef)
+      }
+      if (modelEffect?.responseRef) managed.push(modelEffect.responseRef)
+
+      // Cell-level error when modelEffect is failed/cancelled (not rejected)
+      const modelFailed =
+        modelEffect !== undefined &&
+        (modelEffect.status === 'failed' || modelEffect.status === 'cancelled')
+      const cellOk =
+        frame['ok'] === true && effectError === undefined && !modelFailed
+
       const record: CellExecutionRecord = {
-        schema: 'helix.cell-execution/v1',
+        schema: 'helix.cell-execution/v2',
         cellId: input.cellId,
+        source: input.code,
         sourceDigest: digest(input.code),
         startRevision: numeric(frame['startRevision']),
         endRevision: numeric(frame['endRevision']),
-        status: frame['ok'] === true ? 'success' : 'error',
+        status: cellOk ? 'success' : 'error',
         stdoutPreview: String(frame['stdout'] ?? ''),
         stderrPreview: String(frame['stderr'] ?? ''),
         stdoutTruncated: frame['stdoutTruncated'] === true,
@@ -501,21 +1494,24 @@ export class LiveCellExecutor {
         namespace: Array.isArray(frame['namespace'])
           ? (frame['namespace'] as CellExecutionRecord['namespace'])
           : [],
-        managedObjects: factorioEffect
-          ? [
-              ...(factorioEffect.programRef ? [factorioEffect.programRef] : []),
-              factorioEffect.observationRef,
-              factorioEffect.outputStateRef,
-            ]
-          : [],
+        managedObjects: managed,
         ...(factorioEffect === undefined ? {} : { factorioEffect }),
-        ...(frame['ok'] === true && effectError === undefined
+        ...(modelEffect === undefined ? {} : { modelEffect }),
+        ...(cellOk
           ? {}
           : {
               error: {
-                code: effectError?.code ?? String(error['code'] ?? 'CELL_EXECUTION_ERROR'),
-                ...(error['type'] === undefined ? {} : { type: String(error['type']) }),
-                message: effectError?.message ?? String(error['message'] ?? 'cell execution failed'),
+                code:
+                  modelEffect?.error?.code ??
+                  effectError?.code ??
+                  String(error['code'] ?? 'CELL_EXECUTION_ERROR'),
+                ...(error['type'] === undefined
+                  ? {}
+                  : { type: String(error['type']) }),
+                message:
+                  modelEffect?.error?.message ??
+                  effectError?.message ??
+                  String(error['message'] ?? 'cell execution failed'),
                 stateCertainty: effectError?.stateCertainty ?? 'unchanged',
               },
             }),

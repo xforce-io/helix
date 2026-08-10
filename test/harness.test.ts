@@ -17,9 +17,9 @@ import type {
 
 const pins: RunPins = {
   model: 'test-model',
-  harness: 'factorio-rlm/v3',
+  harness: 'factorio-rlm/v4',
   kernelProtocol: '2',
-  bindingSet: 'factorio/v2',
+  bindingSet: 'factorio/v3',
   renderer: 'markdown-json/v1',
   isolationProfile: 'local-process-ast/v2',
   milkie: 'test-milkie',
@@ -30,6 +30,7 @@ const pins: RunPins = {
   kernelMemoryBytes: 1_073_741_824,
   kernelCpuSeconds: 600,
 }
+
 
 function ref(kind: ObjectRef['kind'], hash: string): ObjectRef {
   return {
@@ -81,8 +82,9 @@ function record(
     },
   }
   return {
-    schema: 'helix.cell-execution/v1',
+    schema: 'helix.cell-execution/v2',
     cellId,
+    source: code,
     sourceDigest: digest(code),
     startRevision: revision - 1,
     endRevision: revision,
@@ -95,6 +97,7 @@ function record(
     managedObjects: [...(programRef ? [programRef] : []), observationRef, stateRef],
     factorioEffect: effect,
   }
+
 }
 
 function toolResponse(id: string, code: string): ModelResponse {
@@ -197,8 +200,9 @@ test('真正的策略越权会立即终止模型循环', async () => {
     budget: { deadlineAt: 10_000 },
     control: { deadlineAt: 10_000 },
     execute: async input => ({
-      schema: 'helix.cell-execution/v1',
+      schema: 'helix.cell-execution/v2',
       cellId: input.cellId,
+      source: input.code,
       sourceDigest: digest(input.code),
       startRevision: 0,
       endRevision: 1,
@@ -233,8 +237,9 @@ test('不确定环境动作立即终止模型循环且不会盲重试', async ()
     budget: { deadlineAt: 10_000 },
     control: { deadlineAt: 10_000 },
     execute: async input => ({
-      schema: 'helix.cell-execution/v1',
+      schema: 'helix.cell-execution/v2',
       cellId: input.cellId,
+      source: input.code,
       sourceDigest: digest(input.code),
       startRevision: 0,
       endRevision: 1,
@@ -280,7 +285,8 @@ test('Bridge 校验错误后下一轮仍保留最近确认的 action capabilitie
       execution += 1
       if (execution === 2) {
         return {
-          schema: 'helix.cell-execution/v1', cellId: input.cellId,
+          schema: 'helix.cell-execution/v2', cellId: input.cellId,
+          source: input.code,
           sourceDigest: digest(input.code), startRevision: 1, endRevision: 2,
           status: 'error', stdoutPreview: '', stderrPreview: '', stdoutTruncated: false,
           stderrTruncated: false, namespace: [], managedObjects: [],

@@ -153,18 +153,191 @@ class EffectResult:
         return json.dumps(self.as_dict(), ensure_ascii=False, indent=2, default=str)
 
 
-class FactorioBinding:
+@dataclass
+class RecursiveModelResult:
+    """Bounded recursive model call result (helix.recursive-model-result/v1)."""
+
+    status: str
+    text: str
+    text_truncated: bool
+    child_run_id: str | None
+    usage: dict[str, Any] | None
+    response_ref: dict[str, Any] | None
+    error: dict[str, Any] | None
+    reservation: dict[str, Any] | None
+    request_digest: str | None = None
+    attach_failed: bool = False
+
+    @classmethod
+    def from_wire(cls, payload: dict[str, Any]) -> "RecursiveModelResult":
+        usage = payload.get("usage")
+        reservation = payload.get("reservation")
+        # Normalize camelCase wire → snake_case Python fields.
+        if isinstance(reservation, dict):
+            reservation = {
+                "reserved_tokens": int(reservation.get("reservedTokens", 0) or 0),
+                "declared_prompt_tokens": int(
+                    reservation.get("declaredPromptTokens", 0) or 0
+                ),
+                "declared_completion_tokens": int(
+                    reservation.get("declaredCompletionTokens", 0) or 0
+                ),
+                "requested_completion_tokens": reservation.get(
+                    "requestedCompletionTokens"
+                ),
+                "actual_usage_tokens": int(
+                    reservation.get("actualUsageTokens", 0) or 0
+                ),
+                "charged_tokens": int(reservation.get("chargedTokens", 0) or 0),
+                "overflow_tokens": int(reservation.get("overflowTokens", 0) or 0),
+            }
+        if isinstance(usage, dict):
+            usage = {
+                "input_tokens": int(usage.get("inputTokens", 0) or 0),
+                "output_tokens": int(usage.get("outputTokens", 0) or 0),
+            }
+        return cls(
+            status=str(payload.get("status", "failed")),
+            text=str(payload.get("text", "")),
+            text_truncated=bool(payload.get("textTruncated", False)),
+            child_run_id=payload.get("childRunId"),
+            usage=usage,
+            response_ref=payload.get("responseRef"),
+            error=payload.get("error"),
+            reservation=reservation,
+            request_digest=payload.get("requestDigest"),
+            attach_failed=bool(payload.get("attachFailed", False)),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "text": self.text,
+            "text_truncated": self.text_truncated,
+            "child_run_id": self.child_run_id,
+            "usage": self.usage,
+            "response_ref": self.response_ref,
+            "error": self.error,
+            "reservation": self.reservation,
+            "request_digest": self.request_digest,
+            "attach_failed": self.attach_failed,
+        }
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.as_dict().get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.as_dict()[key]
+
+    def __repr__(self) -> str:
+        return json.dumps(self.as_dict(), ensure_ascii=False, indent=2, default=str)
+
+
+class HelixModelsBinding:
+    """Kernel-side recursive model binding (capability-gated)."""
+
+    def __init__(self, effect_gate: "CellEffectGate") -> None:
+        self._gate = effect_gate
+
+    def call(
+        self,
+        instructions: str,
+        input: Any = None,
+        max_output_tokens: int | None = None,
+    ) -> RecursiveModelResult:
+        if not isinstance(instructions, str):
+            raise TypeError("helix.models.call(instructions) requires a string")
+        # Do NOT note_effect_attempt before Host response (B2 / I2).
+        # Admission reject must leave the local UX gate free so a later
+        # factorio.step in the same cell can still reach Host.
+        params: dict[str, Any] = {"instructions": instructions}
+        # IMP-2: omit input when None so Host treats it as missing/default empty.
+        if input is not None:
+            params["input"] = input
+        if max_output_tokens is not None:
+            params["maxOutputTokens"] = max_output_tokens
+        send(
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "type": "effect_request",
+                "method": "models.call",
+                "params": params,
+            }
+        )
+        response = receive()
+        if response.get("type") != "effect_response":
+            raise RuntimeError("invalid effect response frame")
+        # IMP-B: ok:false is ONLY for frame/protocol damage → Python exception.
+        if not response.get("ok"):
+            error = response.get("error") or {}
+            raise RuntimeError(
+                f"{error.get('code', 'EFFECT_ERROR')}: "
+                f"{error.get('message', 'models.call failed')}"
+            )
+        result_payload = response.get("result") or {}
+        if not isinstance(result_payload, dict):
+            raise RuntimeError("models.call result must be an object")
+        result = RecursiveModelResult.from_wire(result_payload)
+        # Host occupies only after successful admission (succeeded/failed/cancelled
+        # with commit, or rejected MULTIPLE after prior occupy). Pure admission
+        # rejects (status=rejected, no child, reserved=0) must NOT note.
+        if self._host_occupied_external_effect(result):
+            self._gate.note_effect_attempt()
+        return result
+
+    @staticmethod
+    def _host_occupied_external_effect(result: RecursiveModelResult) -> bool:
+        status = result.status
+        if status in ("succeeded", "failed", "cancelled"):
+            return True
+        if status != "rejected":
+            return False
+        # Rejected after a prior occupy (second effect) still means the cell slot
+        # is taken; note so local factorio UX matches Host.
+        error = result.error or {}
+        code = error.get("code") if isinstance(error, dict) else None
+        if code == "MULTIPLE_EFFECTS_IN_CELL":
+            return True
+        reservation = result.reservation or {}
+        reserved = int(reservation.get("reserved_tokens", 0) or 0)
+        if result.child_run_id or reserved > 0:
+            return True
+        return False
+
+
+class CellEffectGate:
+    """Shared local (non-authoritative) single-effect counter for UX."""
+
     def __init__(self) -> None:
         self._effect_count = 0
-        self.last: EffectResult | None = None
 
     def begin_cell(self) -> None:
         self._effect_count = 0
 
-    def _request(self, method: str, params: dict[str, Any]) -> EffectResult:
+    @property
+    def effect_count(self) -> int:
+        return self._effect_count
+
+    def note_effect_attempt(self) -> None:
+        # Local fast-fail UX. Host still enforces admission-before-occupy.
         if self._effect_count >= 1:
-            raise RuntimeError("MULTIPLE_EFFECTS_IN_CELL: one reset or step per cell")
+            # Factorio path raises; models.call Host path is authoritative.
+            pass
         self._effect_count += 1
+
+
+class FactorioBinding:
+    def __init__(self, effect_gate: CellEffectGate) -> None:
+        self._gate = effect_gate
+        self.last: EffectResult | None = None
+
+    def begin_cell(self) -> None:
+        self._gate.begin_cell()
+
+    def _request(self, method: str, params: dict[str, Any]) -> EffectResult:
+        if self._gate.effect_count >= 1:
+            raise RuntimeError("MULTIPLE_EFFECTS_IN_CELL: one reset or step per cell")
+        self._gate.note_effect_attempt()
         send(
             {
                 "protocolVersion": PROTOCOL_VERSION,
@@ -230,7 +403,9 @@ def truncate(value: str) -> tuple[str, bool]:
 def main() -> None:
     apply_resource_limits()
     shell = InteractiveShell.instance()
-    factorio = FactorioBinding()
+    effect_gate = CellEffectGate()
+    factorio = FactorioBinding(effect_gate)
+    models = HelixModelsBinding(effect_gate)
     revision = 0
 
     while True:
@@ -296,8 +471,19 @@ def main() -> None:
             continue
 
         factorio.begin_cell()
+        bootstrap = frame.get("bootstrap") or {}
+        capabilities = bootstrap.get("capabilities") or {}
+        recursive_cap = capabilities.get("recursiveModel") or {}
+        recursive_enabled = bool(recursive_cap.get("enabled", False))
+
+        helix_ns: dict[str, Any] = {
+            "task": bootstrap.get("task"),
+            "runtime": bootstrap.get("runtime"),
+        }
+        if recursive_enabled:
+            helix_ns["models"] = models
         shell.user_ns["factorio"] = factorio
-        shell.user_ns["helix"] = SimpleNamespace(**(frame.get("bootstrap") or {}))
+        shell.user_ns["helix"] = SimpleNamespace(**helix_ns)
         captured_stdout = BoundedTextBuffer(MAX_OUTPUT_CHARS)
         captured_stderr = BoundedTextBuffer(MAX_OUTPUT_CHARS)
         error: dict[str, Any] | None = None
@@ -345,10 +531,11 @@ def main() -> None:
                 "stdoutTruncated": stdout_truncated,
                 "stderrTruncated": stderr_truncated,
                 "namespace": namespace_inventory(shell),
-                "effectCount": factorio._effect_count,
+                "effectCount": effect_gate.effect_count,
                 **({"error": error} if error else {}),
             }
         )
+
 
 
 if __name__ == "__main__":
