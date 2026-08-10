@@ -17,6 +17,18 @@ export const FINALIZATION_ROOT = path.join(ARTIFACT_ROOT, 'final-outcomes')
 export const LIVE_WALL_TIMEOUT_MS = 30 * 60 * 1_000
 export const REPLAY_WALL_TIMEOUT_MS = 5 * 60 * 1_000
 export const MILKIE_COMMIT = 'd74128cf3ac976ebd68eb1b87f340574811c6366'
+export {
+  CHILD_REPLAY_SAFETY_WALL_MS,
+  CONTROL_SETTLE_TOLERANCE_MS,
+  DEFAULT_PARENT_RECURSIVE_TOKEN_POOL,
+  MAX_RECURSIVE_CALLS_PER_RUN,
+  MAX_RECURSIVE_COMPLETION_TOKENS,
+  MAX_RECURSIVE_INSTRUCTIONS_BYTES,
+  MAX_RECURSIVE_INPUT_BYTES,
+  MAX_RECURSIVE_PROMPT_TOKENS,
+  MIN_RESERVE_TOKENS,
+} from './recursive-model.js'
+
 export const TASK_DIGEST =
   'sha256:c50497c8548123494e48376e51ace2dd4f66717421de3a9f930d5833b6572f44'
 const FACTORIO_CONTAINER = 'helix-factorio_0'
@@ -42,9 +54,9 @@ export function requireModel(): string {
 export function pins(model: string): RunPins {
   return {
     model,
-    harness: 'factorio-rlm/v3',
+    harness: 'factorio-rlm/v4',
     kernelProtocol: '2',
-    bindingSet: 'factorio/v2',
+    bindingSet: 'factorio/v3',
     renderer: 'markdown-json/v1',
     isolationProfile: 'local-process-ast/v2',
     milkie: MILKIE_COMMIT,

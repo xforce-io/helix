@@ -7,6 +7,12 @@ import {
   type ModelResponse,
 } from 'milkie'
 import { canonicalJson, digest } from './canonical.js'
+import {
+  DEFAULT_PARENT_RECURSIVE_TOKEN_POOL,
+  MAX_RECURSIVE_CALLS_PER_RUN,
+  MAX_RECURSIVE_COMPLETION_TOKENS,
+  parentTerminationFromRecursive,
+} from './recursive-model.js'
 import type {
   CellExecutionRecord,
   EpisodeProjection,
@@ -28,10 +34,11 @@ You have exactly one external tool: execute_cell(code). Every call runs one Pyth
 
 Protocol:
 1. Your first environment effect must be a cell containing factorio.reset(). Read its returned task information, inventory, positions, and verification state.
-2. On later turns, use the actual prior cell result to decide the next cell. Submit at most one factorio.reset() or factorio.step(program) per cell.
+2. On later turns, use the actual prior cell result to decide the next cell. Submit at most one external effect per cell: either factorio.reset()/factorio.step(program) OR helix.models.call(...), never both in the same cell.
 3. factorio.step accepts a Python source string executed in FLE's public namespace. Resource, Prototype, Direction, Position, and BuildingBox are already defined there—NEVER add import statements inside the action string. After reset, factorioEffect.actionCapabilities is the canonical allowlist. Call only names in that list; never guess an API name. Useful signatures include nearest(Resource.IronOre), move_to(Position(...)), place_entity(Prototype.X, direction=Direction.DOWN, position=Position(...)), place_entity_next_to(Prototype.X, reference_position, Direction.DOWN), insert_item(Prototype.Coal, target_entity, quantity=50), get_entities(), pickup_entity(entity), and nearest_buildable(prototype, BuildingBox(width=..., height=...), center_position).
-4. Imports in either the outer cell or action string, files, shell/process/network APIs, dynamic execution, private attributes, and raw RCON are forbidden. A policy violation terminates the run. Keep an action program below 10,000 characters.
-5. Inspect errors and observations and correct your program. Continue until task_verification.success is true. Do not claim success yourself; only the environment verifier decides.
+4. When capabilities.recursiveModel.enabled is true, you may call helix.models.call(instructions, input=None, max_output_tokens=None) in its own cell to run a bounded recursive model query. It returns a RecursiveModelResult with status/text/usage/child_run_id/response_ref. Read those fields in later cells; do not expect the full response to be expanded into outer context automatically. Recursive calls share the parent remainingRecursiveModelTokens pool and remainingRecursiveModelCalls count.
+5. Imports in either the outer cell or action string, files, shell/process/network APIs, dynamic execution, private attributes, and raw RCON are forbidden. A policy violation terminates the run. Keep an action program below 10,000 characters.
+6. Inspect errors and observations and correct your program. Continue until task_verification.success is true. Do not claim success yourself; only the environment verifier decides.
 
 Call factorio.reset() exactly once, in the first cell. Never reset again after it succeeds.
 
@@ -45,6 +52,20 @@ export interface HarnessOptions {
   budget: RunBudget
   control: IOInvocationControl
   execute: (input: ExecuteCellInput, signal?: AbortSignal) => Promise<CellExecutionRecord>
+  /** Optional overrides for recursive model budget projection. */
+  recursiveModel?: {
+    enabled?: boolean
+    initialTokens?: number
+    maxCalls?: number
+  }
+  /**
+   * Live source of truth for remaining recursive tokens / call count.
+   * When provided, ContextEnvelope budget fields prefer this over fold approx.
+   */
+  getRecursiveBudget?: () => {
+    remainingTokens: number
+    recursiveCallCount: number
+  }
 }
 
 export interface HarnessResult {
@@ -57,7 +78,11 @@ export interface HarnessResult {
   toolCallCount: number
 }
 
-function initialProjection(runId: string, episodeId: string): EpisodeProjection {
+function initialProjection(
+  runId: string,
+  episodeId: string,
+  initialRecursiveTokens: number,
+): EpisodeProjection {
   return {
     runId,
     episodeId,
@@ -65,6 +90,8 @@ function initialProjection(runId: string, episodeId: string): EpisodeProjection 
     resetCount: 0,
     stepCount: 0,
     modelCallCount: 0,
+    recursiveCallCount: 0,
+    remainingRecursiveModelTokens: initialRecursiveTokens,
     cells: [],
     verification: { success: false, meta: [] },
     terminated: false,
@@ -77,11 +104,48 @@ function foldRecord(
   record: CellExecutionRecord,
 ): EpisodeProjection {
   const effect = record.factorioEffect
+  const modelEffect = record.modelEffect
+  let recursiveCallCount = projection.recursiveCallCount
+  let remainingRecursiveModelTokens = projection.remainingRecursiveModelTokens
+  let recursiveControlTermination = projection.recursiveControlTermination
+
+  if (modelEffect) {
+    if (modelEffect.childRunId || modelEffect.status === 'succeeded') {
+      recursiveCallCount += 1
+    }
+    const charged = modelEffect.reservation.chargedTokens
+    const reserved = modelEffect.reservation.reservedTokens
+    if (
+      modelEffect.status === 'succeeded' ||
+      modelEffect.status === 'failed' ||
+      modelEffect.status === 'cancelled'
+    ) {
+      if (reserved > 0) {
+        remainingRecursiveModelTokens = Math.max(
+          0,
+          remainingRecursiveModelTokens - charged,
+        )
+      }
+    }
+    const control = parentTerminationFromRecursive(
+      modelEffect.error?.code as
+        | 'RECURSIVE_MODEL_CANCELLED'
+        | 'RECURSIVE_MODEL_DEADLINE'
+        | undefined,
+    )
+    if (control) recursiveControlTermination = control
+  }
+
   return {
     ...projection,
     kernelRevision: record.endRevision,
     resetCount: projection.resetCount + (effect?.method === 'reset' ? 1 : 0),
     stepCount: projection.stepCount + (effect?.method === 'step' ? 1 : 0),
+    recursiveCallCount,
+    remainingRecursiveModelTokens,
+    ...(recursiveControlTermination
+      ? { recursiveControlTermination }
+      : {}),
     cells: [...projection.cells, record],
     ...(effect
       ? {
@@ -100,10 +164,14 @@ function contextEnvelope(
   projection: EpisodeProjection,
   pins: RunPins,
   remainingWallMs: number,
+  recursiveEnabled: boolean,
+  maxRecursiveCalls: number,
+  maxCompletionTokens: number,
 ): Record<string, unknown> {
   const lastCell = projection.cells.at(-1)
+  const remainingCalls = Math.max(0, maxRecursiveCalls - projection.recursiveCallCount)
   return {
-    schema: 'helix.context/v2',
+    schema: 'helix.context/v3',
     runtime: {
       runId: projection.runId,
       episodeId: projection.episodeId,
@@ -123,7 +191,12 @@ function contextEnvelope(
         persistentNamespace: true,
         maxOneEnvironmentEffect: true,
       },
-      bindings: ['helix', 'factorio'],
+      recursiveModel: {
+        enabled: recursiveEnabled,
+        remainingCalls,
+        remainingTokens: projection.remainingRecursiveModelTokens,
+        maxCompletionTokens,
+      },
       factorioActionCalls: projection.actionCapabilities ?? [],
     },
     episode: {
@@ -143,6 +216,15 @@ function contextEnvelope(
           error: lastCell.error,
           observationRef: lastCell.factorioEffect?.observationRef.hash,
           stateRef: lastCell.factorioEffect?.outputStateRef.hash,
+          modelEffect: lastCell.modelEffect
+            ? {
+                status: lastCell.modelEffect.status,
+                childRunId: lastCell.modelEffect.childRunId,
+                textPreview: lastCell.modelEffect.textPreview.slice(0, 512),
+                requestDigest: lastCell.modelEffect.requestDigest,
+                error: lastCell.modelEffect.error,
+              }
+            : undefined,
         }
       : null,
     budget: {
@@ -150,6 +232,8 @@ function contextEnvelope(
       remainingEnvironmentSteps: 64 - projection.stepCount,
       remainingModelCalls: MAX_MODEL_CALLS - projection.modelCallCount,
       remainingWallMs,
+      remainingRecursiveModelCalls: remainingCalls,
+      remainingRecursiveModelTokens: projection.remainingRecursiveModelTokens,
     },
   }
 }
@@ -191,6 +275,7 @@ function entityForModel(value: unknown): unknown {
  */
 function recordForModel(record: CellExecutionRecord): Record<string, unknown> {
   const effect = record.factorioEffect
+  const modelEffect = record.modelEffect
   const observation = effect?.observation ?? {}
   const rawText = String(observation['rawText'] ?? '')
   const entities = Array.isArray(observation['entities'])
@@ -203,7 +288,7 @@ function recordForModel(record: CellExecutionRecord): Record<string, unknown> {
     startRevision: record.startRevision,
     endRevision: record.endRevision,
     status: record.status,
-    stdoutPreview: effect ? undefined : record.stdoutPreview.slice(0, 2_048),
+    stdoutPreview: effect || modelEffect ? undefined : record.stdoutPreview.slice(0, 2_048),
     stderrPreview: record.stderrPreview.slice(0, 2_048),
     error: record.error,
     namespace: record.namespace,
@@ -236,6 +321,21 @@ function recordForModel(record: CellExecutionRecord): Record<string, unknown> {
           truncated: effect.truncated,
           verification: effect.verification,
           metrics: effect.metrics,
+        }
+      : undefined,
+    modelEffect: modelEffect
+      ? {
+          method: modelEffect.method,
+          status: modelEffect.status,
+          childRunId: modelEffect.childRunId,
+          requestDigest: modelEffect.requestDigest,
+          attachFailed: modelEffect.attachFailed === true ? true : undefined,
+          textPreview: modelEffect.textPreview.slice(0, 2_048),
+          textTruncated: modelEffect.textTruncated,
+          usage: modelEffect.usage,
+          responseRef: refForModel(modelEffect.responseRef),
+          reservation: modelEffect.reservation,
+          error: modelEffect.error,
         }
       : undefined,
   }
@@ -276,7 +376,17 @@ function verificationFrom(projection: EpisodeProjection): TaskVerification {
 }
 
 export async function runHarness(options: HarnessOptions): Promise<HarnessResult> {
-  let projection = initialProjection(options.runId, options.episodeId)
+  const recursiveEnabled = options.recursiveModel?.enabled !== false
+  const initialRecursiveTokens =
+    options.recursiveModel?.initialTokens ?? DEFAULT_PARENT_RECURSIVE_TOKEN_POOL
+  const maxRecursiveCalls =
+    options.recursiveModel?.maxCalls ?? MAX_RECURSIVE_CALLS_PER_RUN
+
+  let projection = initialProjection(
+    options.runId,
+    options.episodeId,
+    initialRecursiveTokens,
+  )
   let priorExchange: Message[] = []
   let retryMessage: Message | undefined
   const modelResponses: ModelResponse[] = []
@@ -296,8 +406,31 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
   })
 
   for (let modelOrdinal = 0; modelOrdinal < MAX_MODEL_CALLS; modelOrdinal += 1) {
+    if (projection.recursiveControlTermination === 'cancelled') {
+      return finish('cancelled')
+    }
+    if (projection.recursiveControlTermination === 'wall_budget_exhausted') {
+      return finish('wall_budget_exhausted')
+    }
+
+    const liveBudget = options.getRecursiveBudget?.()
+    if (liveBudget) {
+      projection = {
+        ...projection,
+        remainingRecursiveModelTokens: liveBudget.remainingTokens,
+        recursiveCallCount: liveBudget.recursiveCallCount,
+      }
+    }
+
     const remainingWallMs = Math.max(0, options.budget.deadlineAt - options.port.now())
-    const envelope = contextEnvelope(projection, options.pins, remainingWallMs)
+    const envelope = contextEnvelope(
+      projection,
+      options.pins,
+      remainingWallMs,
+      recursiveEnabled,
+      maxRecursiveCalls,
+      MAX_RECURSIVE_COMPLETION_TOKENS,
+    )
     const envelopeText = renderEnvelope(envelope)
     const messages = [
       ...priorExchange,
@@ -416,6 +549,13 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
         ],
       },
     ]
+
+    if (projection.recursiveControlTermination === 'cancelled') {
+      return finish('cancelled')
+    }
+    if (projection.recursiveControlTermination === 'wall_budget_exhausted') {
+      return finish('wall_budget_exhausted')
+    }
 
     if (`${record.error?.code ?? ''} ${record.error?.message ?? ''}`.includes('POLICY_VIOLATION')) {
       return finish('policy_violation')

@@ -28,7 +28,7 @@ import {
   writeEvidence,
 } from './cli-common.js'
 import { runHarness } from './harness.js'
-import { LiveCellExecutor } from './live-executor.js'
+import { LiveCellExecutor, type ChildPortHandle } from './live-executor.js'
 import type {
   CellExecutionRecord,
   LiveEvidence,
@@ -36,9 +36,13 @@ import type {
   TerminationReason,
 } from './types.js'
 import {
+  buildChildRunIds,
   decideFinalOutcome,
   episodeContinuityCheck,
   finalizationEvidenceEventIds,
+  liveRecursiveChecks,
+  pinsGateCheck,
+  scanRecursiveResultWitness,
   traceChecksBeforeFinalization,
 } from './verification.js'
 
@@ -93,7 +97,53 @@ async function main(): Promise<void> {
     objects,
     new CausalCursor(),
   )
-  const executor = new LiveCellExecutor(runId, episodeId, runPins, objects)
+  const control = { deadlineAt: budget.deadlineAt, signal: controller.signal }
+  const executor = new LiveCellExecutor(runId, episodeId, runPins, objects, {
+    recursiveModelEnabled: true,
+    control,
+    childPortFactory: async args => {
+      const childBase = new DefaultIOPort(gateway)
+      const childPort = new RecordingIOPort(
+        childBase,
+        traceStore,
+        args.childRunId,
+        'helix.factorio.recursive-model',
+        objects,
+        new CausalCursor(),
+      )
+      let attached = false
+      try {
+        await childPort.attach({
+          agentId: args.agentId,
+          goal: args.goal,
+          input: args.input,
+          contextId: args.episodeId,
+          parentId: args.parentRunId,
+        })
+        attached = true
+      } catch (error) {
+        const handle: ChildPortHandle = {
+          port: childPort,
+          attached: false,
+          detach: async () => undefined,
+        }
+        throw Object.assign(
+          error instanceof Error ? error : new Error(String(error)),
+          { handle },
+        )
+      }
+      let detached = false
+      return {
+        port: childPort,
+        attached,
+        detach: async payload => {
+          if (detached) return
+          detached = true
+          await childPort.detach(payload)
+        },
+      }
+    },
+  })
   const finalizationStore = new FileTaskOutcomeFinalizationStore(FINALIZATION_ROOT)
   const milkie = new Milkie({
     stateStore: new MemoryStore(),
@@ -110,7 +160,7 @@ async function main(): Promise<void> {
     contextId: episodeId,
   })
 
-  let harnessResult: Awaited<ReturnType<typeof runHarness>>
+  let harnessResult: Awaited<ReturnType<typeof runHarness>> | undefined
   let detached = false
   const detachOnce = async (
     payload: Parameters<typeof port.detach>[0],
@@ -126,8 +176,16 @@ async function main(): Promise<void> {
       pins: runPins,
       port,
       budget,
-      control: { deadlineAt: budget.deadlineAt, signal: controller.signal },
+      control,
       execute: (input, signal) => executor.execute(input, signal),
+      recursiveModel: { enabled: true },
+      getRecursiveBudget: () => {
+        const pool = executor.getBudgetPool()
+        return {
+          remainingTokens: pool.remainingTokens,
+          recursiveCallCount: pool.recursiveCallCount,
+        }
+      },
     })
     await detachOnce({
       status: completionStatus(harnessResult.termination),
@@ -144,9 +202,33 @@ async function main(): Promise<void> {
     process.off('SIGTERM', cancel)
   }
 
+  if (!harnessResult) throw new Error('harness did not produce a result')
+
+
   const projection = harnessResult.projection
   const refs = allObjectRefs(projection.cells)
+  const pool = executor.getBudgetPool()
+  const { childRunIds, nonReplayableChildRunIds } = buildChildRunIds(projection.cells)
+  // Prefer executor-observed started set when available (authoritative attach path).
+  const evidenceChildRunIds =
+    executor.childRunIds.length > 0 ? [...executor.childRunIds] : childRunIds
+  const evidenceNonReplayable =
+    executor.nonReplayableChildRunIds.length > 0
+      ? [...executor.nonReplayableChildRunIds]
+      : nonReplayableChildRunIds
+
+  // I3: witness scans recorded CellExecutionRecord.source/code (not stdout proxy).
+  const cellSources = projection.cells.map((cell, cellIndex) => ({
+    cellIndex,
+    source: cell.source ?? '',
+  }))
+  const recursiveResultWitness = scanRecursiveResultWitness(
+    projection.cells,
+    cellSources,
+  )
+
   const baseChecks = [
+    pinsGateCheck(runPins),
     {
       id: 'S1.model-owned',
       passed: harnessResult.modelOwned && projection.cells.length >= 2,
@@ -197,14 +279,34 @@ async function main(): Promise<void> {
       detail: `kernel=${executor.kernelStartCount} bridge=${executor.bridgeStartCount}`,
     },
     episodeContinuityCheck(projection.cells),
+    {
+      id: 'S1.child-run-unique',
+      passed: new Set(evidenceChildRunIds).size === evidenceChildRunIds.length,
+      detail: JSON.stringify(evidenceChildRunIds),
+    },
   ]
+  const recursiveChecks = liveRecursiveChecks({
+    evidence: {
+      childRunIds: evidenceChildRunIds,
+      nonReplayableChildRunIds: evidenceNonReplayable,
+      ...(recursiveResultWitness ? { recursiveResultWitness } : {}),
+      pins: runPins,
+    },
+    records: projection.cells,
+    cellSources,
+    termination: harnessResult.termination,
+  })
   const eventsBeforeFinalization = (await traceStore.readByRunId(runId)) as Event[]
   const preFinalizationTraceChecks = traceChecksBeforeFinalization(
     eventsBeforeFinalization,
     projection.modelCallCount,
     harnessResult.toolCallCount,
   )
-  const preFinalizationChecks = [...baseChecks, ...preFinalizationTraceChecks]
+  const preFinalizationChecks = [
+    ...baseChecks,
+    ...recursiveChecks,
+    ...preFinalizationTraceChecks,
+  ]
   const outcomeValue = decideFinalOutcome(
     preFinalizationChecks,
     harnessResult.termination,
@@ -230,6 +332,7 @@ async function main(): Promise<void> {
       { name: 'modelCalls', value: projection.modelCallCount },
       { name: 'cells', value: projection.cells.length },
       { name: 'steps', value: projection.stepCount },
+      { name: 'recursiveCalls', value: pool.recursiveCallCount },
     ],
   })
   if (finalizationAttempt.status === 'conflict') {
@@ -251,7 +354,7 @@ async function main(): Promise<void> {
   }
   const checks = [...preFinalizationChecks, finalizationCheck]
   const evidenceCore: LiveEvidence = {
-    schema: 'helix.factorio.live/v2',
+    schema: 'helix.factorio.live/v3',
     verdict:
       checks.every(check => check.passed) && finalization.value === 'success'
         ? 'pass'
@@ -261,6 +364,7 @@ async function main(): Promise<void> {
     budget: {
       ...budget,
       remainingWallMsAtEnd: Math.max(0, budget.deadlineAt - Date.now()),
+      remainingRecursiveModelTokensAtEnd: pool.remainingTokens,
     },
     termination: harnessResult.termination,
     projectionDigest: digest(projection),
@@ -268,6 +372,15 @@ async function main(): Promise<void> {
     objectStore: OBJECT_ROOT,
     finalProjection: projection,
     finalization,
+    childRunIds: evidenceChildRunIds,
+    ...(evidenceNonReplayable.length > 0
+      ? { nonReplayableChildRunIds: evidenceNonReplayable }
+      : {}),
+    recursiveModel: {
+      calls: pool.recursiveCallCount,
+      settlements: pool.settlements,
+    },
+    ...(recursiveResultWitness ? { recursiveResultWitness } : {}),
     checks,
   }
   const evidence = await attachEvidenceRef(objects, evidenceCore)
@@ -282,6 +395,9 @@ async function main(): Promise<void> {
         budget: evidence.budget,
         projectionDigest: evidence.projectionDigest,
         termination: evidence.termination,
+        childRunIds: evidence.childRunIds,
+        recursiveModel: evidence.recursiveModel,
+        recursiveResultWitness: evidence.recursiveResultWitness,
         finalization: evidence.finalization,
         checks: evidence.checks,
         evidenceRef: evidence.evidenceRef,

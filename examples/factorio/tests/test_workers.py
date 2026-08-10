@@ -130,5 +130,158 @@ class KernelContractTest(unittest.TestCase):
             )
 
 
+class RecursiveModelBindingTest(unittest.TestCase):
+    def test_result_from_wire_normalizes_fields(self) -> None:
+        result = kernel.RecursiveModelResult.from_wire(
+            {
+                "status": "succeeded",
+                "text": "hello",
+                "textTruncated": False,
+                "childRunId": "run:rmc:0",
+                "usage": {"inputTokens": 3, "outputTokens": 5},
+                "responseRef": {"hash": "sha256:x"},
+                "reservation": {
+                    "reservedTokens": 10,
+                    "declaredPromptTokens": 4,
+                    "declaredCompletionTokens": 6,
+                    "requestedCompletionTokens": 2048,
+                    "actualUsageTokens": 8,
+                    "chargedTokens": 8,
+                    "overflowTokens": 0,
+                },
+                "requestDigest": "sha256:abc",
+                "attachFailed": False,
+                "error": None,
+            }
+        )
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.child_run_id, "run:rmc:0")
+        self.assertEqual(result.usage, {"input_tokens": 3, "output_tokens": 5})
+        self.assertEqual(result.reservation["charged_tokens"], 8)
+        self.assertEqual(result.request_digest, "sha256:abc")
+        self.assertFalse(result.attach_failed)
+        self.assertEqual(result["text"], "hello")
+
+    def test_models_binding_requires_string_instructions(self) -> None:
+        gate = kernel.CellEffectGate()
+        models = kernel.HelixModelsBinding(gate)
+        with self.assertRaises(TypeError):
+            models.call(123)  # type: ignore[arg-type]
+
+
+
+
+class RecursiveEffectGateTest(unittest.TestCase):
+    def test_admission_reject_does_not_poison_local_effect_gate(self) -> None:
+        """B2: illegal models.call then factorio.step must still reach Host."""
+        gate = kernel.CellEffectGate()
+        models = kernel.HelixModelsBinding(gate)
+        factorio = kernel.FactorioBinding(gate)
+
+        frames: list[dict] = []
+        responses = iter(
+            [
+                {
+                    "type": "effect_response",
+                    "ok": True,
+                    "result": {
+                        "status": "rejected",
+                        "text": "",
+                        "textTruncated": False,
+                        "childRunId": None,
+                        "usage": None,
+                        "responseRef": None,
+                        "reservation": {
+                            "reservedTokens": 0,
+                            "declaredPromptTokens": 1,
+                            "declaredCompletionTokens": 0,
+                            "actualUsageTokens": 0,
+                            "chargedTokens": 0,
+                            "overflowTokens": 0,
+                        },
+                        "requestDigest": "sha256:x",
+                        "error": {
+                            "code": "RECURSIVE_BUDGET_INSUFFICIENT",
+                            "message": "pool empty",
+                        },
+                    },
+                },
+                {
+                    "type": "effect_response",
+                    "ok": True,
+                    "result": {
+                        "observation": {"ok": True},
+                        "refs": {},
+                        "metrics": {},
+                    },
+                },
+            ]
+        )
+
+        def fake_send(frame: dict) -> None:
+            frames.append(frame)
+
+        def fake_receive() -> dict:
+            return next(responses)
+
+        original_send = kernel.send
+        original_receive = kernel.receive
+        kernel.send = fake_send  # type: ignore[assignment]
+        kernel.receive = fake_receive  # type: ignore[assignment]
+        try:
+            result = models.call("illegal then step")
+            self.assertEqual(result.status, "rejected")
+            self.assertEqual(gate.effect_count, 0)
+            step = factorio.step("print(1)")
+            self.assertEqual(step.observation, {"ok": True})
+            self.assertEqual(gate.effect_count, 1)
+            self.assertEqual(frames[0]["method"], "models.call")
+            self.assertEqual(frames[1]["method"], "step")
+        finally:
+            kernel.send = original_send  # type: ignore[assignment]
+            kernel.receive = original_receive  # type: ignore[assignment]
+
+    def test_succeeded_models_call_notes_local_effect_gate(self) -> None:
+        gate = kernel.CellEffectGate()
+        models = kernel.HelixModelsBinding(gate)
+        responses = iter(
+            [
+                {
+                    "type": "effect_response",
+                    "ok": True,
+                    "result": {
+                        "status": "succeeded",
+                        "text": "ok",
+                        "textTruncated": False,
+                        "childRunId": "run:rmc:0",
+                        "usage": {"inputTokens": 1, "outputTokens": 1},
+                        "responseRef": {"hash": "sha256:r"},
+                        "reservation": {
+                            "reservedTokens": 10,
+                            "declaredPromptTokens": 4,
+                            "declaredCompletionTokens": 6,
+                            "actualUsageTokens": 2,
+                            "chargedTokens": 2,
+                            "overflowTokens": 0,
+                        },
+                        "requestDigest": "sha256:x",
+                        "error": None,
+                    },
+                }
+            ]
+        )
+        original_send = kernel.send
+        original_receive = kernel.receive
+        kernel.send = lambda frame: None  # type: ignore[assignment]
+        kernel.receive = lambda: next(responses)  # type: ignore[assignment]
+        try:
+            result = models.call("ok")
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(gate.effect_count, 1)
+        finally:
+            kernel.send = original_send  # type: ignore[assignment]
+            kernel.receive = original_receive  # type: ignore[assignment]
+
+
 if __name__ == "__main__":
     unittest.main()

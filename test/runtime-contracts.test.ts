@@ -120,9 +120,9 @@ test('Trace 前置断言失败时绝不能封账 success Outcome', () => {
 test('执行器在启动进程前拒绝 stale episode revision 和错误 pins', async () => {
   const pins: RunPins = {
     model: 'test-model',
-    harness: 'factorio-rlm/v3',
+    harness: 'factorio-rlm/v4',
     kernelProtocol: '2',
-    bindingSet: 'factorio/v2',
+    bindingSet: 'factorio/v3',
     renderer: 'markdown-json/v1',
     isolationProfile: 'local-process-ast/v2',
     milkie: 'test-milkie',
@@ -181,7 +181,7 @@ test('success gate 拒绝断裂的 stepIndex 和 State Ref 链', () => {
   }
   const broken: CellExecutionRecord[] = [
     {
-      schema: 'helix.cell-execution/v1', cellId: 'c0', sourceDigest: digest('reset'),
+      schema: 'helix.cell-execution/v2', cellId: 'c0', source: '', sourceDigest: digest('reset'),
       startRevision: 0, endRevision: 1, status: 'success', stdoutPreview: '',
       stderrPreview: '', stdoutTruncated: false, stderrTruncated: false,
       namespace: [], managedObjects: [observation, state0],
@@ -195,7 +195,7 @@ test('success gate 拒绝断裂的 stepIndex 和 State Ref 链', () => {
       },
     },
     {
-      schema: 'helix.cell-execution/v1', cellId: 'c1', sourceDigest: digest('step'),
+      schema: 'helix.cell-execution/v2', cellId: 'c1', source: '', sourceDigest: digest('step'),
       startRevision: 1, endRevision: 2, status: 'success', stdoutPreview: '',
       stderrPreview: '', stdoutTruncated: false, stderrTruncated: false,
       namespace: [], managedObjects: [observation, state2],

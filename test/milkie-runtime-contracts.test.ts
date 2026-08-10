@@ -27,9 +27,9 @@ import type { RunPins } from '../src/factorio/types.js'
 
 const pins: RunPins = {
   model: 'test-model',
-  harness: 'factorio-rlm/v3',
+  harness: 'factorio-rlm/v4',
   kernelProtocol: '2',
-  bindingSet: 'factorio/v2',
+  bindingSet: 'factorio/v3',
   renderer: 'markdown-json/v1',
   isolationProfile: 'local-process-ast/v2',
   milkie: 'test-milkie',
@@ -40,6 +40,7 @@ const pins: RunPins = {
   kernelMemoryBytes: 1_073_741_824,
   kernelCpuSeconds: 600,
 }
+
 
 class HangingGateway implements IModelGateway {
   async complete(
