@@ -1,14 +1,16 @@
 # Helix project overview
 
-Status: Factorio acceptance vertical delivered through Issues #1, #3, and #5
-(RLM harness, milkie runtime control/finalization, and Kernel recursive model
-calls). Initial delivery sequence item 1 is complete in the Factorio example;
-general public runtime contracts and sequence items 2–5 remain future work.
+Status: Factorio acceptance vertical delivered through Issues #1, #3, #5, and #7
+(RLM harness, milkie runtime control/finalization, Kernel recursive model calls,
+and persistent session / async sub-agent / mailbox). Initial delivery sequence
+items 1–2 are complete in the Factorio example; general public runtime contracts
+and sequence items 3–5 remain future work.
 
 Approved designs:
 [Issue #1 L2](./design/1-rlm-factorio-harness.md) ·
 [Issue #3 L2](./design/3-factorio-milkie-runtime-contracts.md) ·
-[Issue #5 L2](./design/5-kernel-recursive-model-call.md).
+[Issue #5 L2](./design/5-kernel-recursive-model-call.md) ·
+[Issue #7 L2](./design/7-session-subagent-mailbox.md).
 
 ## Purpose
 
@@ -87,7 +89,9 @@ Harness changes have two scopes:
    ([#1](https://github.com/xforce-io/helix/issues/1),
    [#3](https://github.com/xforce-io/helix/issues/3),
    [#5](https://github.com/xforce-io/helix/issues/5)).
-2. Persistent sessions, asynchronous sub-agent handles, and mailboxes.
+2. ~~Persistent sessions, asynchronous sub-agent handles, and mailboxes.~~
+   **Done** in the Factorio example
+   ([#7](https://github.com/xforce-io/helix/issues/7)).
 3. Versioned harness state and session-local overlays.
 4. Trace-driven refiner producing structured harness candidates.
 5. Fork or fresh-suite evaluation and deterministic promotion or rollback.
