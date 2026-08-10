@@ -756,8 +756,17 @@ export function extractResponseText(response: {
 export function assertEffectsExclusive(record: {
   factorioEffect?: unknown
   modelEffect?: unknown
+  sessionEffect?: unknown
+  agentEffect?: unknown
+  mailboxEffect?: unknown
 }): boolean {
-  return !(record.factorioEffect !== undefined && record.modelEffect !== undefined)
+  let n = 0
+  if (record.factorioEffect !== undefined) n += 1
+  if (record.modelEffect !== undefined) n += 1
+  if (record.sessionEffect !== undefined) n += 1
+  if (record.agentEffect !== undefined) n += 1
+  if (record.mailboxEffect !== undefined) n += 1
+  return n <= 1
 }
 
 export function parentTerminationFromRecursive(

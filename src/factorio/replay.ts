@@ -17,6 +17,7 @@ import {
   FINALIZATION_ROOT,
   objectStore,
   pins,
+  pinsSessionAsync,
   readLiveEvidence,
   REPLAY_WALL_TIMEOUT_MS,
   summarizeFinalization,
@@ -32,11 +33,13 @@ import {
   c1SettlementRefundCheck,
   collectC1Effects,
   modelEffectInvariantsCheck,
-  pinsGateCheck,
+  pinsGateFor,
   rejectLegacyPins,
   requestDigestReplayChecks,
+  sessionEvidenceChecks,
   singleEffectMutualExclusionCheck,
 } from './verification.js'
+import { REPLAY_EVIDENCE_SCHEMA } from './session-async-constants.js'
 
 export type ChildReplayCheck = {
   id: string
@@ -327,7 +330,10 @@ async function main(): Promise<void> {
       'live evidence pins are rejected by v4 runner (legacy or mismatched)',
     )
   }
-  const replayPins = pins(live.pins.model)
+  const replayPins =
+    live.pins.sessionAsyncVersion === '1' || live.pins.harness === 'factorio-rlm/v5'
+      ? pinsSessionAsync(live.pins.model)
+      : pins(live.pins.model)
   if (digest(replayPins) !== digest(live.pins)) {
     throw new Error('live evidence pins do not match the current replay contract')
   }
@@ -427,8 +433,31 @@ async function main(): Promise<void> {
     c.modelEffect ? [c.modelEffect] : [],
   )
 
+  const sessionChecks = sessionEvidenceChecks({
+    live: {
+      schema: live.schema,
+      ...(live.session ? { session: live.session } : {}),
+      ...(live.sessionMergeEvents
+        ? { sessionMergeEvents: live.sessionMergeEvents }
+        : {}),
+      ...(live.sessionMergeCommits
+        ? { sessionMergeCommits: live.sessionMergeCommits }
+        : {}),
+      ...(live.sessionBudgetSettlements
+        ? { sessionBudgetSettlements: live.sessionBudgetSettlements }
+        : {}),
+      budget: live.budget,
+      pins: live.pins,
+    },
+    // Fail-closed from pins — never depend on optional live.session presence.
+    // Schema v4 alone is not enough without session-async pins.
+    requireSession:
+      live.pins?.sessionAsyncVersion === '1' ||
+      live.pins?.harness === 'factorio-rlm/v5',
+  })
+
   const checks = [
-    pinsGateCheck(replayPins),
+    pinsGateFor(replayPins),
     legacyGate,
     {
       id: 'S2.parent-replay-zero-live',
@@ -487,6 +516,7 @@ async function main(): Promise<void> {
     attachTripleForbiddenCheck(result.projection.cells, childRunIds),
     ...requestDigestReplayChecks(modelEffects),
     ...childChecks,
+    ...sessionChecks,
     // Keep legacy check ids for compatibility with existing tooling.
     {
       id: 'S3.replay-zero-live-effects',
@@ -498,7 +528,10 @@ async function main(): Promise<void> {
     },
   ]
   const evidenceCore: ReplayEvidence = {
-    schema: 'helix.factorio.replay/v3',
+    schema:
+      live.pins.sessionAsyncVersion === '1' || live.pins.harness === 'factorio-rlm/v5'
+        ? REPLAY_EVIDENCE_SCHEMA
+        : 'helix.factorio.replay/v3',
     verdict: checks.every(check => check.passed) ? 'pass' : 'fail',
     runId,
     termination: result.termination,
@@ -513,6 +546,9 @@ async function main(): Promise<void> {
     remainingIO,
     childRunIds,
     childReplays,
+    ...(live.session?.projectionHash
+      ? { sessionProjectionHash: live.session.projectionHash }
+      : {}),
     checks,
   }
   const evidence = await attachEvidenceRef(objects, evidenceCore)

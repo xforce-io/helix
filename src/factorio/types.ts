@@ -6,6 +6,10 @@ export interface ObjectRef {
     | 'fle.action-program'
     | 'helix.output'
     | 'helix.model-response'
+    | 'helix.mailbox-payload'
+    | 'helix.session-projection'
+    | 'helix.handle-result'
+    | 'helix.session-dedupe'
   schema: string
   mediaType: 'application/json' | 'text/plain'
   bytes: number
@@ -153,8 +157,86 @@ export interface RecursiveResultWitness {
   matchedValueHash: string
 }
 
+export interface SessionEffect {
+  method: 'session.create' | 'session.resume' | 'session.checkpoint'
+  sessionId: string
+  sessionVersion: number
+  projectionHash: string
+  cutoffCausalSeq: number
+  noop?: boolean
+}
+
+export interface AgentEffectReservation {
+  reservedTokens: number
+  declaredPromptTokens: number
+  declaredCompletionTokens: number
+  requestedCompletionTokens?: number
+  actualUsageTokens?: number
+  chargedTokens?: number
+  overflowTokens?: number
+}
+
+export interface AgentEffect {
+  method: 'agents.spawn' | 'agents.wait'
+  handleId: string
+  childRunId?: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rejected'
+  requestDigest?: string
+  reservation?: AgentEffectReservation
+  error?: { code: string; message: string }
+}
+
+export interface MailboxEffect {
+  method: 'mailbox.send' | 'mailbox.receive'
+  mailboxId: string
+  msgId?: string
+  msgSeq?: number
+  payloadHash?: string
+  consumed?: boolean
+  causalSeq?: number
+}
+
+export interface SessionAsyncCapability {
+  enabled: boolean
+  maxActiveHandles: number
+  remainingActiveHandleSlots: number
+  maxHandlesPerSession: number
+  remainingHistoricalHandleSlots: number
+  maxMailboxDepth: number
+  maxMailboxMsgBytes: number
+  sessionId: string | null
+  sessionVersion: number | null
+}
+
+export interface SessionMergeEventEvidence {
+  mergeKey: string
+  causalSeq: number
+  payloadHash: string
+  kind: string
+  count: number
+}
+
+export interface SessionMergeCommitEvidence {
+  sessionVersion: number
+  cutoffCausalSeq: number
+  committedMergeKeysHash: string
+  projectionHash: string
+}
+
+export interface SessionBudgetSettlementEvidence {
+  handleId: string
+  reservedTokens: number
+  declaredPromptTokens: number
+  declaredCompletionTokens: number
+  requestedCompletionTokens?: number
+  actualUsageTokens: number
+  chargedTokens: number
+  overflowTokens: number
+  status: string
+}
+
 export interface CellExecutionRecord {
-  schema: 'helix.cell-execution/v2'
+  schema: 'helix.cell-execution/v2' | 'helix.cell-execution/v3'
   cellId: string
   /** Recorded cell source/code used for S1 witness scan (I3). */
   source: string
@@ -169,8 +251,11 @@ export interface CellExecutionRecord {
   namespace: Array<{ name: string; type: string; length?: number }>
   managedObjects: ObjectRef[]
   factorioEffect?: FactorioEffect
-  /** Mutually exclusive with factorioEffect. */
+  /** Mutually exclusive with factorioEffect / sessionEffect / agentEffect / mailboxEffect. */
   modelEffect?: ModelEffect
+  sessionEffect?: SessionEffect
+  agentEffect?: AgentEffect
+  mailboxEffect?: MailboxEffect
   error?: {
     code: string
     type?: string
@@ -181,9 +266,9 @@ export interface CellExecutionRecord {
 
 export interface RunPins {
   model: string
-  harness: 'factorio-rlm/v4'
+  harness: 'factorio-rlm/v4' | 'factorio-rlm/v5'
   kernelProtocol: '2'
-  bindingSet: 'factorio/v3'
+  bindingSet: 'factorio/v3' | 'factorio/v4'
   renderer: 'markdown-json/v1'
   isolationProfile: 'local-process-ast/v2'
   milkie: string
@@ -193,6 +278,8 @@ export interface RunPins {
   taskDigest: string
   kernelMemoryBytes: number
   kernelCpuSeconds: number
+  /** Present on v5 session-async runs only. */
+  sessionAsyncVersion?: '1'
 }
 
 export interface RunBudget {
@@ -237,16 +324,23 @@ export interface EpisodeProjection {
   truncated: boolean
   /** Control-class recursive termination signal latched from child path. */
   recursiveControlTermination?: 'cancelled' | 'wall_budget_exhausted'
+  /** Bound Helix session id when sessionAsync is active. */
+  sessionId?: string | null
+  sessionVersion?: number | null
+  remainingSessionTokens?: number
+  remainingActiveHandleSlots?: number
+  remainingHistoricalHandleSlots?: number
 }
 
 export interface LiveEvidence {
-  schema: 'helix.factorio.live/v3'
+  schema: 'helix.factorio.live/v3' | 'helix.factorio.live/v4'
   verdict: 'pass' | 'fail'
   runId: string
   pins: RunPins
   budget: RunBudget & {
     remainingWallMsAtEnd: number
     remainingRecursiveModelTokensAtEnd?: number
+    remainingSessionTokensAtEnd?: number
   }
   termination: TerminationReason
   projectionDigest: string
@@ -254,7 +348,7 @@ export interface LiveEvidence {
   objectStore: string
   finalProjection: EpisodeProjection
   finalization: FinalizationSummary
-  /** Observed started/attached child run ids (success LLM + C2). */
+  /** Observed started/attached child run ids (success LLM + C2 + agents). */
   childRunIds: string[]
   /** C1 attachFailed ids (never-started); optional audit. */
   nonReplayableChildRunIds?: string[]
@@ -263,12 +357,21 @@ export interface LiveEvidence {
     settlements: ModelBudgetSettlement[]
   }
   recursiveResultWitness?: RecursiveResultWitness
+  session?: {
+    id: string
+    version: number
+    projectionHash: string
+    cutoffCausalSeq: number
+  }
+  sessionMergeEvents?: SessionMergeEventEvidence[]
+  sessionMergeCommits?: SessionMergeCommitEvidence[]
+  sessionBudgetSettlements?: SessionBudgetSettlementEvidence[]
   checks: Array<{ id: string; passed: boolean; detail?: string }>
   evidenceRef?: string
 }
 
 export interface ReplayEvidence {
-  schema: 'helix.factorio.replay/v3'
+  schema: 'helix.factorio.replay/v3' | 'helix.factorio.replay/v4'
   verdict: 'pass' | 'fail'
   runId: string
   termination: TerminationReason
@@ -284,6 +387,7 @@ export interface ReplayEvidence {
     remainingIO: { llm: number; tool: number; clock: number; uuid: number }
     parentId?: string
   }>
+  sessionProjectionHash?: string
   checks: Array<{ id: string; passed: boolean; detail?: string }>
   evidenceRef?: string
 }

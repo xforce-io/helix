@@ -30,15 +30,20 @@ import {
   truncatePreview,
 } from './recursive-model.js'
 import type { DeclaredLimits, PreparedRecursiveAdmission } from './recursive-model.js'
+import { SessionAsyncHost, type SessionAsyncHostOptions } from './session-async-host.js'
+import { CELL_EXECUTION_SCHEMA } from './session-async-constants.js'
 import type {
+  AgentEffect,
   CellExecutionRecord,
   FactorioEffect,
+  MailboxEffect,
   ModelBudgetPool,
   ModelBudgetSettlement,
   ModelEffect,
   ObjectRef,
   RecursiveModelResult,
   RunPins,
+  SessionEffect,
   TaskVerification,
 } from './types.js'
 
@@ -78,8 +83,18 @@ export type ChildPortFactory = (args: {
   parentRunId: string
   episodeId: string
   goal: string
+  /** Non-secret attach/input payload — never a capability token. */
   input: string
   agentId: string
+  /**
+   * Host-private child session binding. MUST NOT be copied into attach,
+   * trace payloads, or invokeLLM request bodies.
+   */
+  sessionBootstrap?: {
+    sessionId: string
+    handleId: string
+    capabilityToken: string
+  }
 }) => Promise<ChildPortHandle>
 
 export interface LiveCellExecutorOptions {
@@ -106,6 +121,8 @@ export interface LiveCellExecutorOptions {
    * Proves post-invoke INTERNAL settles actual usage and detaches once.
    */
   internalFaultAfterInvoke?: boolean
+  /** Issue #7 session/async/mailbox host options. */
+  sessionAsync?: SessionAsyncHostOptions
 }
 
 /** Mutable stage tracker for post-prepare INTERNAL / unexpected failure handling. */
@@ -307,6 +324,8 @@ export class LiveCellExecutor {
   /** In-flight post-prepare stage for INTERNAL catch (not concurrent). */
   private activeModelsCallStage: ModelsCallStage | undefined
   private pendingControlTermination: 'cancelled' | 'wall_budget_exhausted' | undefined
+  /** Issue #7 session/async host (optional). */
+  readonly sessionAsync: SessionAsyncHost | undefined
 
   /** Observed started/attached child run ids (success + C2). */
   readonly childRunIds: string[] = []
@@ -342,10 +361,22 @@ export class LiveCellExecutor {
     this.attachFault = options.attachFault
     this.internalFaultAfterPrepare = options.internalFaultAfterPrepare === true
     this.internalFaultAfterInvoke = options.internalFaultAfterInvoke === true
+    if (options.sessionAsync) {
+      const saOpts: SessionAsyncHostOptions = { ...options.sessionAsync }
+      if (options.control) saOpts.control = options.control
+      if (options.childPortFactory && !saOpts.childPortFactory) {
+        saOpts.childPortFactory = options.childPortFactory
+      }
+      if (!saOpts.model) saOpts.model = this.pins.model
+      this.sessionAsync = new SessionAsyncHost(saOpts)
+      this.sessionAsync.bindParent()
+      this.sessionAsync.setParentRunId(runId)
+    }
   }
 
   setControl(control: IOInvocationControl | undefined): void {
     this.control = control
+    this.sessionAsync?.setControl(control)
   }
 
   getBudgetPool(): ModelBudgetPool {
@@ -363,6 +394,7 @@ export class LiveCellExecutor {
   /** Test/harness seam: swap child port factory between cells. */
   setChildPortFactory(factory: ChildPortFactory | undefined): void {
     this.childPortFactory = factory
+    this.sessionAsync?.setChildPortFactory(factory)
   }
 
   /** Test seam: clear per-cell host effect gate between cells. */
@@ -1277,6 +1309,7 @@ export class LiveCellExecutor {
     this.hostEffectOccupied = false
 
     const kernel = this.ensureKernel()
+    const sessionBootstrap = this.sessionAsync?.bootstrapPayload()
     kernel.send({
       protocolVersion: '2',
       type: 'execute',
@@ -1302,25 +1335,38 @@ export class LiveCellExecutor {
             remainingTokens: this.budgetPool.remainingTokens,
             maxCompletionTokens: MAX_RECURSIVE_COMPLETION_TOKENS,
           },
+          ...(sessionBootstrap
+            ? { sessionAsync: sessionBootstrap['sessionAsync'] }
+            : {}),
         },
+        ...(sessionBootstrap
+          ? { session: sessionBootstrap['session'] }
+          : {}),
       },
     })
     let factorioEffect: FactorioEffect | undefined
     let modelEffect: ModelEffect | undefined
+    let sessionEffect: SessionEffect | undefined
+    let agentEffect: AgentEffect | undefined
+    let mailboxEffect: MailboxEffect | undefined
+    const cellSchema = this.sessionAsync
+      ? CELL_EXECUTION_SCHEMA
+      : ('helix.cell-execution/v2' as const)
     let effectError:
       | (Error & {
           code?: string
           stateCertainty?: 'unchanged' | 'confirmed' | 'uncertain'
         })
       | undefined
+    const anyWriteEffect = () =>
+      Boolean(factorioEffect || modelEffect || sessionEffect || agentEffect || mailboxEffect)
     for (;;) {
       let frame: Record<string, unknown>
       try {
         frame = await kernel.receive({
           timeoutMs: KERNEL_CELL_TIMEOUT_MS,
           code: 'KERNEL_TIMEOUT',
-          stateCertainty:
-            factorioEffect || modelEffect ? 'confirmed' : 'unchanged',
+          stateCertainty: anyWriteEffect() ? 'confirmed' : 'unchanged',
           ...(signal === undefined ? {} : { signal }),
         })
       } catch (error) {
@@ -1335,7 +1381,7 @@ export class LiveCellExecutor {
         }
         if (modelEffect?.responseRef) managed.push(modelEffect.responseRef)
         return {
-          schema: 'helix.cell-execution/v2',
+          schema: cellSchema,
           cellId: input.cellId,
           source: input.code,
           sourceDigest: digest(input.code),
@@ -1350,13 +1396,15 @@ export class LiveCellExecutor {
           managedObjects: managed,
           ...(factorioEffect === undefined ? {} : { factorioEffect }),
           ...(modelEffect === undefined ? {} : { modelEffect }),
+          ...(sessionEffect === undefined ? {} : { sessionEffect }),
+          ...(agentEffect === undefined ? {} : { agentEffect }),
+          ...(mailboxEffect === undefined ? {} : { mailboxEffect }),
           error: {
             code: structured.code ?? 'KERNEL_RESOURCE_EXHAUSTED',
             message: structured.message,
-            stateCertainty:
-              factorioEffect === undefined && modelEffect === undefined
-                ? (structured.stateCertainty ?? 'unchanged')
-                : 'confirmed',
+            stateCertainty: anyWriteEffect()
+              ? 'confirmed'
+              : (structured.stateCertainty ?? 'unchanged'),
           },
         }
       }
@@ -1438,6 +1486,64 @@ export class LiveCellExecutor {
           }
           continue
         }
+        if (
+          typeof method === 'string' &&
+          (method.startsWith('session.') ||
+            method.startsWith('agents.') ||
+            method.startsWith('mailbox.'))
+        ) {
+          if (!this.sessionAsync) {
+            kernel.send({
+              type: 'effect_response',
+              ok: true,
+              result: {
+                status: 'rejected',
+                error: {
+                  code: 'SESSION_ASYNC_NOT_ENABLED',
+                  message: 'session async capability is not enabled',
+                },
+              },
+            })
+            continue
+          }
+          const params = asRecord(frame['params'])
+          const handleCtx: {
+            hostEffectOccupied: boolean
+            occupy: () => void
+            parentRunId: string
+            signal?: AbortSignal
+          } = {
+            hostEffectOccupied: this.hostEffectOccupied,
+            occupy: () => {
+              this.hostEffectOccupied = true
+              this.effectCount += 1
+            },
+            parentRunId: this.runId,
+          }
+          if (signal) handleCtx.signal = signal
+          const handled = await this.sessionAsync.handle(method, params, handleCtx)
+          if (!handled.ok) {
+            kernel.send({
+              type: 'effect_response',
+              ok: false,
+              error: { code: handled.code, message: handled.message },
+            })
+            continue
+          }
+          if (handled.sessionEffect) sessionEffect = handled.sessionEffect
+          if (handled.agentEffect) agentEffect = handled.agentEffect
+          if (handled.mailboxEffect) mailboxEffect = handled.mailboxEffect
+          // Merge agent child run ids into executor list
+          for (const id of this.sessionAsync.agentChildRunIds) {
+            if (!this.childRunIds.includes(id)) this.childRunIds.push(id)
+          }
+          kernel.send({
+            type: 'effect_response',
+            ok: true,
+            result: handled.result,
+          })
+          continue
+        }
         // factorio reset/step
         try {
           const handled = await this.handleFactorioEffect(frame, signal)
@@ -1480,7 +1586,7 @@ export class LiveCellExecutor {
         frame['ok'] === true && effectError === undefined && !modelFailed
 
       const record: CellExecutionRecord = {
-        schema: 'helix.cell-execution/v2',
+        schema: cellSchema,
         cellId: input.cellId,
         source: input.code,
         sourceDigest: digest(input.code),
@@ -1497,6 +1603,9 @@ export class LiveCellExecutor {
         managedObjects: managed,
         ...(factorioEffect === undefined ? {} : { factorioEffect }),
         ...(modelEffect === undefined ? {} : { modelEffect }),
+        ...(sessionEffect === undefined ? {} : { sessionEffect }),
+        ...(agentEffect === undefined ? {} : { agentEffect }),
+        ...(mailboxEffect === undefined ? {} : { mailboxEffect }),
         ...(cellOk
           ? {}
           : {
@@ -1521,6 +1630,7 @@ export class LiveCellExecutor {
   }
 
   async close(): Promise<void> {
+    await this.sessionAsync?.drain()
     await this.kernel?.close({ type: 'close', protocolVersion: '2' })
     await this.bridge?.close({
       protocolVersion: '2',

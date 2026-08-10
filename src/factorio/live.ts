@@ -21,14 +21,17 @@ import {
   objectStore,
   OBJECT_ROOT,
   pins,
+  pinsSessionAsync,
   preflightLive,
   requireModel,
+  SESSION_STORE_ROOT,
   summarizeFinalization,
   TRACE_ROOT,
   writeEvidence,
 } from './cli-common.js'
 import { runHarness } from './harness.js'
 import { LiveCellExecutor, type ChildPortHandle } from './live-executor.js'
+import { LIVE_EVIDENCE_SCHEMA } from './session-async-constants.js'
 import type {
   CellExecutionRecord,
   LiveEvidence,
@@ -41,11 +44,10 @@ import {
   episodeContinuityCheck,
   finalizationEvidenceEventIds,
   liveRecursiveChecks,
-  pinsGateCheck,
+  pinsGateFor,
   scanRecursiveResultWitness,
   traceChecksBeforeFinalization,
 } from './verification.js'
-
 function allObjectRefs(records: CellExecutionRecord[]): ObjectRef[] {
   return records.flatMap(record => record.managedObjects)
 }
@@ -79,7 +81,11 @@ async function main(): Promise<void> {
   const cancel = () => controller.abort()
   process.once('SIGINT', cancel)
   process.once('SIGTERM', cancel)
-  const runPins = pins(model)
+  const sessionAsyncEnabled =
+    process.env['HELIX_SESSION_ASYNC'] === '1' ||
+    process.env['HELIX_SESSION_ASYNC'] === 'true' ||
+    process.env['HELIX_SESSION_ASYNC'] === 'yes'
+  const runPins = sessionAsyncEnabled ? pinsSessionAsync(model) : pins(model)
   const traceStore = new JsonlEventStore(TRACE_ROOT)
   const objects = objectStore()
   const apiKey = process.env['ANTHROPIC_AUTH_TOKEN'] ?? process.env['ANTHROPIC_API_KEY']
@@ -98,52 +104,89 @@ async function main(): Promise<void> {
     new CausalCursor(),
   )
   const control = { deadlineAt: budget.deadlineAt, signal: controller.signal }
+  /**
+   * Issue #7 session/async opt-in:
+   * Set HELIX_SESSION_ASYNC=1 (or true/yes) to enable durable SessionAsyncHost
+   * with childPortFactory attach/parentId/invoke path and file-backed SessionStore.
+   * Default remains off so #5 recursive-model path is unchanged.
+   */
+  // sessionAsyncEnabled already resolved above for pins/evidence schema.
+  const childPortFactory = async (args: {
+    childRunId: string
+    parentRunId: string
+    episodeId: string
+    goal: string
+    input: string
+    agentId: string
+    sessionBootstrap?: {
+      sessionId: string
+      handleId: string
+      capabilityToken: string
+    }
+  }): Promise<ChildPortHandle> => {
+    // Host-private bootstrap stays in-process only — never attach/trace/LLM.
+    void args.sessionBootstrap
+    const childBase = new DefaultIOPort(gateway)
+    const childPort = new RecordingIOPort(
+      childBase,
+      traceStore,
+      args.childRunId,
+      'helix.factorio.recursive-model',
+      objects,
+      new CausalCursor(),
+    )
+    let attached = false
+    try {
+      await childPort.attach({
+        agentId: args.agentId,
+        goal: args.goal,
+        input: args.input,
+        contextId: args.episodeId,
+        parentId: args.parentRunId,
+      })
+      attached = true
+    } catch (error) {
+      const handle: ChildPortHandle = {
+        port: childPort,
+        attached: false,
+        detach: async () => undefined,
+      }
+      throw Object.assign(
+        error instanceof Error ? error : new Error(String(error)),
+        { handle },
+      )
+    }
+    let detached = false
+    return {
+      port: childPort,
+      attached,
+      detach: async payload => {
+        if (detached) return
+        detached = true
+        await childPort.detach(payload)
+      },
+    }
+  }
   const executor = new LiveCellExecutor(runId, episodeId, runPins, objects, {
     recursiveModelEnabled: true,
     control,
-    childPortFactory: async args => {
-      const childBase = new DefaultIOPort(gateway)
-      const childPort = new RecordingIOPort(
-        childBase,
-        traceStore,
-        args.childRunId,
-        'helix.factorio.recursive-model',
-        objects,
-        new CausalCursor(),
-      )
-      let attached = false
-      try {
-        await childPort.attach({
-          agentId: args.agentId,
-          goal: args.goal,
-          input: args.input,
-          contextId: args.episodeId,
-          parentId: args.parentRunId,
-        })
-        attached = true
-      } catch (error) {
-        const handle: ChildPortHandle = {
-          port: childPort,
-          attached: false,
-          detach: async () => undefined,
+    childPortFactory,
+    ...(sessionAsyncEnabled
+      ? {
+          sessionAsync: {
+            enabled: true,
+            principalId: 'factorio-live',
+            sessionStoreRoot: SESSION_STORE_ROOT,
+            childPortFactory,
+            model,
+            control,
+          },
         }
-        throw Object.assign(
-          error instanceof Error ? error : new Error(String(error)),
-          { handle },
-        )
-      }
-      let detached = false
-      return {
-        port: childPort,
-        attached,
-        detach: async payload => {
-          if (detached) return
-          detached = true
-          await childPort.detach(payload)
-        },
-      }
-    },
+      : {}),
   })
+  if (sessionAsyncEnabled) {
+    executor.sessionAsync?.setParentRunId(runId)
+  }
   const finalizationStore = new FileTaskOutcomeFinalizationStore(FINALIZATION_ROOT)
   const milkie = new Milkie({
     stateStore: new MemoryStore(),
@@ -226,9 +269,8 @@ async function main(): Promise<void> {
     projection.cells,
     cellSources,
   )
-
   const baseChecks = [
-    pinsGateCheck(runPins),
+    pinsGateFor(runPins),
     {
       id: 'S1.model-owned',
       passed: harnessResult.modelOwned && projection.cells.length >= 2,
@@ -353,8 +395,9 @@ async function main(): Promise<void> {
     detail: `${finalization.status}/${finalization.value}/${finalization.recordHash}`,
   }
   const checks = [...preFinalizationChecks, finalizationCheck]
+  const sessionSlice = executor.sessionAsync?.evidenceSlice()
   const evidenceCore: LiveEvidence = {
-    schema: 'helix.factorio.live/v3',
+    schema: sessionAsyncEnabled ? LIVE_EVIDENCE_SCHEMA : 'helix.factorio.live/v3',
     verdict:
       checks.every(check => check.passed) && finalization.value === 'success'
         ? 'pass'
@@ -365,6 +408,12 @@ async function main(): Promise<void> {
       ...budget,
       remainingWallMsAtEnd: Math.max(0, budget.deadlineAt - Date.now()),
       remainingRecursiveModelTokensAtEnd: pool.remainingTokens,
+      ...(executor.sessionAsync
+        ? {
+            remainingSessionTokensAtEnd:
+              executor.sessionAsync.getSessionPoolRemaining(),
+          }
+        : {}),
     },
     termination: harnessResult.termination,
     projectionDigest: digest(projection),
@@ -381,6 +430,14 @@ async function main(): Promise<void> {
       settlements: pool.settlements,
     },
     ...(recursiveResultWitness ? { recursiveResultWitness } : {}),
+    ...(sessionSlice?.session ? { session: sessionSlice.session } : {}),
+    ...(sessionSlice
+      ? {
+          sessionMergeEvents: sessionSlice.sessionMergeEvents,
+          sessionMergeCommits: sessionSlice.sessionMergeCommits,
+          sessionBudgetSettlements: sessionSlice.sessionBudgetSettlements,
+        }
+      : {}),
     checks,
   }
   const evidence = await attachEvidenceRef(objects, evidenceCore)

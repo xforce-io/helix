@@ -36,6 +36,7 @@ import {
   collectC1Effects,
   liveRecursiveChecks,
   pinsGateCheck,
+  pinsGateCheckV4,
   rejectLegacyPins,
   recursiveWitnessCheck,
   scanRecursiveResultWitness,
@@ -424,13 +425,15 @@ test('factorioEffect and modelEffect are mutually exclusive', () => {
   assert.equal(assertEffectsExclusive({ factorioEffect: {}, modelEffect: {} }), false)
 })
 
-test('pins gate rejects legacy v3', () => {
-  assert.equal(pinsGateCheck(pins).passed, true)
+test('pins gate rejects legacy v3; v4 gate still accepts #5 pins', () => {
+  assert.equal(pinsGateCheckV4(pins).passed, true)
+  assert.equal(pinsGateCheck(pins).passed, false) // v5 runner rejects bare v4
   assert.equal(
     rejectLegacyPins({ harness: 'factorio-rlm/v3', bindingSet: 'factorio/v2', kernelProtocol: '2' })
       .passed,
     false,
   )
+  assert.equal(rejectLegacyPins(pins).passed, true)
 })
 
 // ---------- Unit: childRunIds builder + witness ----------

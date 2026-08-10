@@ -124,14 +124,77 @@ export function episodeContinuityCheck(records: CellExecutionRecord[]): Verifica
 }
 
 export function pinsGateCheck(pins: RunPins): VerificationCheck {
-  const ok =
-    pins.harness === 'factorio-rlm/v4' &&
-    pins.kernelProtocol === '2' &&
-    pins.bindingSet === 'factorio/v3'
+  const missing: string[] = []
+  const wrong: string[] = []
+  const requireString = (key: keyof RunPins, expected?: string) => {
+    const v = pins[key]
+    if (typeof v !== 'string' || v.length === 0) missing.push(String(key))
+    else if (expected !== undefined && v !== expected) wrong.push(`${String(key)}=${String(v)}`)
+  }
+  const requireNumber = (key: keyof RunPins) => {
+    const v = pins[key]
+    if (typeof v !== 'number' || !Number.isFinite(v)) missing.push(String(key))
+  }
+  requireString('model')
+  requireString('harness', 'factorio-rlm/v5')
+  requireString('kernelProtocol', '2')
+  requireString('bindingSet', 'factorio/v4')
+  requireString('renderer', 'markdown-json/v1')
+  requireString('isolationProfile', 'local-process-ast/v2')
+  requireString('milkie')
+  requireString('fle', '0.4.3')
+  requireString('factorioServer', '2.0.73')
+  requireString('taskId', 'iron_ore_throughput')
+  requireString('taskDigest')
+  requireNumber('kernelMemoryBytes')
+  requireNumber('kernelCpuSeconds')
+  requireString('sessionAsyncVersion', '1')
+  const ok = missing.length === 0 && wrong.length === 0
+  return {
+    id: 'pins.v5-gate',
+    passed: ok,
+    detail: ok
+      ? `${pins.harness}/${pins.kernelProtocol}/${pins.bindingSet}/sa=${pins.sessionAsyncVersion}`
+      : `missing=[${missing.join(',')}] wrong=[${wrong.join(',')}]`,
+  }
+}
+
+/** v4 gate retained for #5 regression fixtures — full v4 shape required. */
+export function pinsGateCheckV4(pins: RunPins): VerificationCheck {
+  const missing: string[] = []
+  const wrong: string[] = []
+  const requireString = (key: keyof RunPins, expected?: string) => {
+    const v = pins[key]
+    if (typeof v !== 'string' || v.length === 0) missing.push(String(key))
+    else if (expected !== undefined && v !== expected) wrong.push(`${String(key)}=${String(v)}`)
+  }
+  const requireNumber = (key: keyof RunPins) => {
+    const v = pins[key]
+    if (typeof v !== 'number' || !Number.isFinite(v)) missing.push(String(key))
+  }
+  requireString('model')
+  requireString('harness', 'factorio-rlm/v4')
+  requireString('kernelProtocol', '2')
+  requireString('bindingSet', 'factorio/v3')
+  requireString('renderer', 'markdown-json/v1')
+  requireString('isolationProfile', 'local-process-ast/v2')
+  requireString('milkie')
+  requireString('fle', '0.4.3')
+  requireString('factorioServer', '2.0.73')
+  requireString('taskId', 'iron_ore_throughput')
+  requireString('taskDigest')
+  requireNumber('kernelMemoryBytes')
+  requireNumber('kernelCpuSeconds')
+  if (pins.sessionAsyncVersion !== undefined) {
+    wrong.push('sessionAsyncVersion-present')
+  }
+  const ok = missing.length === 0 && wrong.length === 0
   return {
     id: 'pins.v4-gate',
     passed: ok,
-    detail: `${pins.harness}/${pins.kernelProtocol}/${pins.bindingSet}`,
+    detail: ok
+      ? `${pins.harness}/${pins.kernelProtocol}/${pins.bindingSet}`
+      : `missing=[${missing.join(',')}] wrong=[${wrong.join(',')}]`,
   }
 }
 
@@ -139,17 +202,154 @@ export function rejectLegacyPins(pins: {
   harness?: string
   bindingSet?: string
   kernelProtocol?: string
+  sessionAsyncVersion?: string
+  model?: string
+  renderer?: string
+  isolationProfile?: string
+  milkie?: string
+  fle?: string
+  factorioServer?: string
+  taskId?: string
+  taskDigest?: string
+  kernelMemoryBytes?: number
+  kernelCpuSeconds?: number
 }): VerificationCheck {
-  const isLegacy =
+  // Reject only pre-#5 pins. v4 (#5) and v5 (#7) are both current depending on path.
+  const isLegacyV3 =
     pins.harness === 'factorio-rlm/v3' || pins.bindingSet === 'factorio/v2'
+  const rejected = isLegacyV3 || pins.kernelProtocol !== '2'
   return {
-    id: 'pins.reject-legacy-v3',
-    passed: !isLegacy && pins.kernelProtocol === '2',
-    detail: isLegacy
-      ? 'legacy v3 pins must not be interpreted by v4 runner'
+    id: 'pins.reject-legacy',
+    passed: !rejected,
+    detail: rejected
+      ? 'legacy v3 pins must not be interpreted by current runner'
       : 'current pins accepted',
   }
 }
+
+/** Select pins gate for live/replay evidence (v4 #5 vs v5 #7). */
+export function pinsGateFor(pins: RunPins): VerificationCheck {
+  if (pins.sessionAsyncVersion === '1' || pins.harness === 'factorio-rlm/v5') {
+    return pinsGateCheck(pins)
+  }
+  return pinsGateCheckV4(pins)
+}
+
+/** True when evidence/pins declare session-async — independent of optional live.session. */
+export function sessionAsyncEvidenceRequired(args: {
+  schema?: string
+  pins?: Pick<RunPins, 'harness' | 'sessionAsyncVersion'>
+}): boolean {
+  if (args.pins?.sessionAsyncVersion === '1') return true
+  if (args.pins?.harness === 'factorio-rlm/v5') return true
+  // Schema alone is not enough — v4 schema is only used with session-async pins.
+  // Keep schema check as secondary when paired with missing pins object in tests.
+  if (
+    (args.schema === 'helix.factorio.live/v4' ||
+      args.schema === 'helix.factorio.replay/v4') &&
+    args.pins === undefined
+  ) {
+    return true
+  }
+  return false
+}
+
+/** Fail-closed session evidence gate for live/replay v4 artifacts. */
+export function sessionEvidenceChecks(args: {
+  live: {
+    schema?: string
+    session?: {
+      id: string
+      version: number
+      projectionHash: string
+      cutoffCausalSeq: number
+    }
+    sessionMergeEvents?: unknown
+    sessionMergeCommits?: unknown
+    sessionBudgetSettlements?: unknown
+    budget?: { remainingSessionTokensAtEnd?: number }
+    pins?: RunPins
+  }
+  /**
+   * When true, force session checks.
+   * When omitted/false, still force if pins/schema declare session-async
+   * (v5 harness, sessionAsyncVersion, or live/replay schema v4).
+   * Optional live.session alone must not be the only gate.
+   */
+  requireSession?: boolean
+}): VerificationCheck[] {
+  const autoRequire = sessionAsyncEvidenceRequired({
+    ...(args.live.schema === undefined ? {} : { schema: args.live.schema }),
+    ...(args.live.pins
+      ? {
+          pins: {
+            harness: args.live.pins.harness,
+            ...(args.live.pins.sessionAsyncVersion === undefined
+              ? {}
+              : { sessionAsyncVersion: args.live.pins.sessionAsyncVersion }),
+          },
+        }
+      : {}),
+  })
+  const requireSession = args.requireSession === true || autoRequire
+  const schemaOk =
+    args.live.schema === undefined ||
+    args.live.schema === 'helix.factorio.live/v4' ||
+    args.live.schema === 'helix.factorio.replay/v4'
+  const hasSession = Boolean(args.live.session?.id)
+  const checks: VerificationCheck[] = [
+    {
+      id: 'S7.live-schema-v4',
+      passed: schemaOk,
+      detail: `schema=${args.live.schema ?? 'missing'}`,
+    },
+  ]
+  if (requireSession || hasSession) {
+    const s = args.live.session
+    checks.push({
+      id: 'S7.session-projection',
+      passed: Boolean(
+        s &&
+          typeof s.id === 'string' &&
+          typeof s.version === 'number' &&
+          typeof s.projectionHash === 'string' &&
+          s.projectionHash.length === 64 &&
+          typeof s.cutoffCausalSeq === 'number',
+      ),
+      detail: s
+        ? `${s.id}@v${s.version} hash=${s.projectionHash.slice(0, 12)}`
+        : 'session missing',
+    })
+    checks.push({
+      id: 'S7.session-merge-events',
+      passed: Array.isArray(args.live.sessionMergeEvents),
+      detail: `events=${Array.isArray(args.live.sessionMergeEvents) ? args.live.sessionMergeEvents.length : 'missing'}`,
+    })
+    checks.push({
+      id: 'S7.session-merge-commits',
+      passed: Array.isArray(args.live.sessionMergeCommits),
+      detail: `commits=${Array.isArray(args.live.sessionMergeCommits) ? args.live.sessionMergeCommits.length : 'missing'}`,
+    })
+    checks.push({
+      id: 'S7.session-budget-settlements',
+      passed: Array.isArray(args.live.sessionBudgetSettlements),
+      detail: `settlements=${Array.isArray(args.live.sessionBudgetSettlements) ? args.live.sessionBudgetSettlements.length : 'missing'}`,
+    })
+    checks.push({
+      id: 'S7.session-budget-remaining',
+      passed:
+        typeof args.live.budget?.remainingSessionTokensAtEnd === 'number' &&
+        Number.isFinite(args.live.budget.remainingSessionTokensAtEnd) &&
+        args.live.budget.remainingSessionTokensAtEnd >= 0,
+      detail: `remainingSessionTokensAtEnd=${String(args.live.budget?.remainingSessionTokensAtEnd)}`,
+    })
+    if (args.live.pins) {
+      checks.push(pinsGateCheck(args.live.pins))
+    }
+  }
+  return checks
+}
+
 
 export function singleEffectMutualExclusionCheck(
   records: CellExecutionRecord[],
@@ -158,9 +358,12 @@ export function singleEffectMutualExclusionCheck(
   return {
     id: 'S3.single-effect-mutex',
     passed: ok,
-    detail: ok ? 'no cell has both factorioEffect and modelEffect' : 'mutex violated',
+    detail: ok
+      ? 'no cell has more than one of factorio/model/session/agent/mailbox effect'
+      : 'mutex violated',
   }
 }
+
 
 export function modelEffectInvariantsCheck(
   records: CellExecutionRecord[],
