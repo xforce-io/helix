@@ -1,12 +1,14 @@
 # Helix project overview
 
-Status: Issue #1 Factorio vertical implemented; general public runtime
-contracts remain future work.
+Status: Factorio acceptance vertical delivered through Issues #1, #3, and #5
+(RLM harness, milkie runtime control/finalization, and Kernel recursive model
+calls). Initial delivery sequence item 1 is complete in the Factorio example;
+general public runtime contracts and sequence items 2–5 remain future work.
 
-The L1 proposal in
-[Issue #1](https://github.com/xforce-io/helix/issues/1#issuecomment-5224797737)
-has been approved. The Factorio acceptance vertical is specified in the
-[implemented L2 design](./design/1-rlm-factorio-harness.md).
+Approved designs:
+[Issue #1 L2](./design/1-rlm-factorio-harness.md) ·
+[Issue #3 L2](./design/3-factorio-milkie-runtime-contracts.md) ·
+[Issue #5 L2](./design/5-kernel-recursive-model-call.md).
 
 ## Purpose
 
@@ -80,8 +82,11 @@ Harness changes have two scopes:
 
 ## Initial delivery sequence
 
-1. Object-addressed context plus a sandboxed IPython kernel with programmatic
-   tools and recursive model calls.
+1. ~~Object-addressed context plus a sandboxed IPython kernel with programmatic
+   tools and recursive model calls.~~ **Done** in the Factorio example
+   ([#1](https://github.com/xforce-io/helix/issues/1),
+   [#3](https://github.com/xforce-io/helix/issues/3),
+   [#5](https://github.com/xforce-io/helix/issues/5)).
 2. Persistent sessions, asynchronous sub-agent handles, and mailboxes.
 3. Versioned harness state and session-local overlays.
 4. Trace-driven refiner producing structured harness candidates.
