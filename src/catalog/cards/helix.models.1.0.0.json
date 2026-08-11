@@ -1,0 +1,52 @@
+{
+  "id": "helix.models",
+  "version": "1.0.0",
+  "kind": "runtime",
+  "registrationScope": "runtime-catalog",
+  "injectionTarget": "kernel-binding",
+  "provider": "helix-runtime",
+  "capabilityDiscoveryKeys": ["recursiveModel"],
+  "pinsTouch": "binding sets that enable recursiveModel must resolve to helix.models@1.0.0",
+  "surface": [
+    {
+      "name": "helix.models.call",
+      "signature": "call(instructions, input=None, max_output_tokens=None) -> RecursiveModelResult",
+      "effectClass": "model_effect",
+      "occupiesHostEffectSlot": true
+    }
+  ],
+  "effect": {
+    "effectClasses": ["model_effect"],
+    "hostSlotSummary": "After admission, occupies the Host single-effect slot; mutually exclusive with other occupying classes; admission failure leaves live side effects at 0.",
+    "mutualExclusionWith": [
+      "env_effect",
+      "commit",
+      "spawn",
+      "wait_external",
+      "admin(occupies=true)",
+      "model_effect"
+    ]
+  },
+  "budgetAndAuth": {
+    "capabilityGate": "capabilities.recursiveModel.enabled",
+    "tokenPool": "parent remaining model budget pool (#5 reserve/settle)",
+    "countBudget": "recursive call count budget",
+    "unauthorized": "binding unavailable and/or effect rejected (RECURSIVE_MODEL_NOT_ENABLED); fail-closed before Provider; does not occupy slot"
+  },
+  "doc": {
+    "format": "markdown/v1",
+    "title": "helix.models",
+    "body": "Synchronous recursive model query from the persistent Kernel.\n\n## Entry\n\n`result = helix.models.call(instructions, input=None, max_output_tokens=None)`\n\n- Fixed to parent run model pin; temperature=0.\n- Returns bounded RecursiveModelResult: status, text preview, usage, child_run_id, response_ref.\n- Does not expand full provider response into outer LLM context.\n\n## Capability projection\n\nDiscovered only via `capabilities.recursiveModel` {enabled, remainingCalls, remainingTokens, maxCompletionTokens}.\nWhen enabled=false, binding is not injected; Host rejects with RECURSIVE_MODEL_NOT_ENABLED.\n\n## Effect\n\neffectClass=model_effect; occupies Host single-effect slot after admission.\nMutually exclusive with domain environment effects (`env_effect`), session write paths, spawn/wait, mailbox durable changes, and other model_effect in the same cell.\n\n## Budget\n\nShares parent remaining model token pool and recursive call count. Admission computes declared caps, reserves before Provider, settles actual/charged/overflow after terminal.\n\n## Replay\n\nEach admitted call is an independent child run (parentId link). Parent cell records modelEffect. Parent/child I/O queues isolated. Zero live Provider fallback on Replay."
+  },
+  "replay": {
+    "recordingAnchor": "parent CellExecutionRecord.modelEffect + child run Trace",
+    "zeroLiveFallback": true,
+    "isolation": "parent/child I/O queues isolated",
+    "notes": "Align #5; C1 attachFailed ∉ childRunIds; C2 post-started replayable"
+  },
+  "nonGoals": [
+    "async sub-agent / mailbox / cross-run session",
+    "arbitrary model routing / public npm Runtime API",
+    "parallel multi-child same cell / rewrite #7 session semantics"
+  ]
+}

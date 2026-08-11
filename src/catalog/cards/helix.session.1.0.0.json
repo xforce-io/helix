@@ -1,0 +1,105 @@
+{
+  "id": "helix.session",
+  "version": "1.0.0",
+  "kind": "runtime",
+  "registrationScope": "runtime-catalog",
+  "injectionTarget": "kernel-binding",
+  "provider": "helix-runtime",
+  "capabilityDiscoveryKeys": ["sessionAsync"],
+  "pinsTouch": "binding sets that enable sessionAsync must resolve to helix.session@1.0.0",
+  "surface": [
+    {
+      "name": "helix.session.create",
+      "signature": "create(capability_token, metadata=None) -> SessionView",
+      "effectClass": "admin",
+      "occupiesHostEffectSlot": true
+    },
+    {
+      "name": "helix.session.resume",
+      "signature": "resume(session_id, capability_token, version=None) -> SessionView",
+      "effectClass": "admin",
+      "occupiesHostEffectSlot": true
+    },
+    {
+      "name": "helix.session.checkpoint",
+      "signature": "checkpoint(note=None) -> SessionView",
+      "effectClass": "admin",
+      "occupiesHostEffectSlot": true
+    },
+    {
+      "name": "helix.session.lookup",
+      "signature": "lookup(session_id=None, capability_token=None) -> SessionView",
+      "effectClass": "observe",
+      "occupiesHostEffectSlot": false
+    },
+    {
+      "name": "helix.agents.spawn",
+      "signature": "spawn(instructions, input=None, max_output_tokens=None, mailbox=True) -> HandleView",
+      "effectClass": "spawn",
+      "occupiesHostEffectSlot": true
+    },
+    {
+      "name": "helix.agents.wait",
+      "signature": "wait(handle_id, timeout_ms=None) -> HandleView",
+      "effectClass": "wait_external",
+      "occupiesHostEffectSlot": true
+    },
+    {
+      "name": "helix.agents.poll",
+      "signature": "poll(handle_id) -> HandleView",
+      "effectClass": "observe",
+      "occupiesHostEffectSlot": false
+    },
+    {
+      "name": "helix.mailbox.send",
+      "signature": "send(to, payload, to_handle_id=None) -> Receipt",
+      "effectClass": "commit",
+      "occupiesHostEffectSlot": true
+    },
+    {
+      "name": "helix.mailbox.receive",
+      "signature": "receive(mailbox_id=None, timeout_ms=0) -> Message | None",
+      "effectClass": "commit",
+      "occupiesHostEffectSlot": true
+    },
+    {
+      "name": "helix.mailbox.peek",
+      "signature": "peek(mailbox_id=None) -> Message | None",
+      "effectClass": "observe",
+      "occupiesHostEffectSlot": false
+    }
+  ],
+  "effect": {
+    "effectClasses": ["admin", "observe", "spawn", "wait_external", "commit"],
+    "hostSlotSummary": "Occupying entries (admin with occupies=true, spawn, wait_external, commit) are mutually exclusive with model_effect and future env_effect; observe never occupies; receive occupies only when a durable cursor advances (details in #7).",
+    "actorModel": "Host derives actor from capability; model self-claims are ignored",
+    "opaqueCapability": true
+  },
+  "budgetAndAuth": {
+    "capabilityGate": "capabilities.sessionAsync.enabled",
+    "auth": "SessionCreationCapability vs session-bound SessionCapability; principal binding; cross-principal resume is non-enumerable",
+    "limits": {
+      "maxActiveHandles": 4,
+      "maxHandlesPerSession": 16,
+      "mailbox": "bounded per #7"
+    },
+    "unauthorized": "fail-closed, non-enumerable, live side effects 0, no secret leakage"
+  },
+  "doc": {
+    "format": "markdown/v1",
+    "title": "helix.session (family card)",
+    "body": "One physical capability card covering three Kernel namespaces: helix.session, helix.agents, helix.mailbox.\nShared gate: capabilities.sessionAsync.enabled. This is NOT harness baseline/overlay state (#10).\n\n## Session\n\n- create(capability_token, metadata=None) — admin, occupies slot\n- resume(session_id, capability_token, version=None) — admin, occupies slot\n- checkpoint(note=None) — admin, occupies slot; commits monotonic sessionVersion\n- lookup(...) — observe, no slot; actor-filtered SessionView\n\nSession projection is the sole cross-run authority. Live Kernel namespace is same-run cache only.\n\n## Agents\n\n- spawn(...) — spawn class; returns handle immediately; independent child run + parentId\n- wait(handle_id, timeout_ms=None) — wait_external; blocking path occupies slot\n- poll(handle_id) — observe snapshot; no slot\n\nNo bare threads. Handle state machine: pending→running→{completed|failed|cancelled}|rejected.\n\n## Mailbox\n\n- send(to, payload, ...) — commit; durable enqueue occupies slot\n- receive(...) — commit; successful consume/cursor advance occupies; empty/no durable mutation per #7 does not\n- peek(...) — observe; no cursor advance; no slot\n\nBounded depth/size. Authorization matrix fail-closed.\n\n### helix.mailbox.receive occupancy (align #7)\n\n1. `timeout_ms == 0`: occupies the Host single-effect slot only when a message is **successfully consumed and the cursor advances**; empty queue with no durable mutation → **does not occupy**.\n2. `timeout_ms > 0`: once admission succeeds and the wait path is entered, the slot **is occupied**; even if the wait times out with no consume and no cursor advance, the slot is **not rolled back**.\n3. Entry `effectClass` remains `commit`; positive-timeout receive must not be described as `observe`.\n4. Tests must separate: static classification = commit; runtime gate = non-blocking empty vs positive timeout paths.\n\n## Cut vs helix.models\n\nmodels.call remains synchronous recursive query (#5). Session/async/mailbox must not be stuffed into models.call.\n\n## Replay\n\nCommitted sessionVersion boundaries; checkpoint include/exclude; exactly-once merge via append-only ledger + dedupeSnapshot; zero live fallback on related runs."
+  },
+  "replay": {
+    "recordingAnchor": "session projection versions + domain-event/merge ledger + handle/mailbox cell effects",
+    "zeroLiveFallback": true,
+    "exactlyOnceMerge": true,
+    "checkpointBounds": "included/excluded handle terminals and mailbox enqueues relative to committed version V",
+    "notes": "Align #7; session ≠ harness state"
+  },
+  "nonGoals": [
+    "bare threads without handle / unbounded mailbox / public npm Runtime API",
+    "treat session as harness baseline/overlay / rewrite #5 call semantics",
+    "Global Evolution / promotion / enumerable multi-tenant session namespace without auth"
+  ]
+}
