@@ -17,6 +17,7 @@ import {
   argument,
   attachEvidenceRef,
   FINALIZATION_ROOT,
+  HARNESS_STATE_ROOT,
   LIVE_WALL_TIMEOUT_MS,
   objectStore,
   OBJECT_ROOT,
@@ -29,6 +30,11 @@ import {
   TRACE_ROOT,
   writeEvidence,
 } from './cli-common.js'
+import {
+  assembleFactorioRun,
+  createFactorioHostBundle,
+} from './harness-host.js'
+
 import { runHarness } from './harness.js'
 import { LiveCellExecutor, type ChildPortHandle } from './live-executor.js'
 import { LIVE_EVIDENCE_SCHEMA } from './session-async-constants.js'
@@ -85,7 +91,17 @@ async function main(): Promise<void> {
     process.env['HELIX_SESSION_ASYNC'] === '1' ||
     process.env['HELIX_SESSION_ASYNC'] === 'true' ||
     process.env['HELIX_SESSION_ASYNC'] === 'yes'
-  const runPins = sessionAsyncEnabled ? pinsSessionAsync(model) : pins(model)
+  const basePins = sessionAsyncEnabled ? pinsSessionAsync(model) : pins(model)
+  const hostBundle = createFactorioHostBundle({ rootDir: HARNESS_STATE_ROOT })
+  const assembled = assembleFactorioRun({
+    bundle: hostBundle,
+    basePins,
+    baselineRef: sessionAsyncEnabled
+      ? hostBundle.legacyV5BaselineRef
+      : hostBundle.defaultBaselineRef,
+  })
+  const runPins = assembled.pins
+
   const traceStore = new JsonlEventStore(TRACE_ROOT)
   const objects = objectStore()
   const apiKey = process.env['ANTHROPIC_AUTH_TOKEN'] ?? process.env['ANTHROPIC_API_KEY']
@@ -118,6 +134,8 @@ async function main(): Promise<void> {
     goal: string
     input: string
     agentId: string
+    frozenHarness?: (typeof assembled)['frozen']
+    harnessState?: (typeof assembled)['pins']['harnessState']
     sessionBootstrap?: {
       sessionId: string
       handleId: string
@@ -125,7 +143,10 @@ async function main(): Promise<void> {
     }
   }): Promise<ChildPortHandle> => {
     // Host-private bootstrap stays in-process only — never attach/trace/LLM.
+    // Inherited harness slice is identity for child record/metadata, not attach payload.
     void args.sessionBootstrap
+    void args.frozenHarness
+    void args.harnessState
     const childBase = new DefaultIOPort(gateway)
     const childPort = new RecordingIOPort(
       childBase,
@@ -169,6 +190,7 @@ async function main(): Promise<void> {
   }
   const executor = new LiveCellExecutor(runId, episodeId, runPins, objects, {
     recursiveModelEnabled: true,
+    frozenHarness: assembled.frozen,
     control,
     childPortFactory,
     ...(sessionAsyncEnabled
@@ -221,6 +243,9 @@ async function main(): Promise<void> {
       budget,
       control,
       execute: (input, signal) => executor.execute(input, signal),
+      frozenHarness: assembled.frozen,
+      controlPlaneText: assembled.controlPlaneText,
+      controlPlaneContentHash: assembled.controlPlaneContentHash,
       recursiveModel: { enabled: true },
       getRecursiveBudget: () => {
         const pool = executor.getBudgetPool()
@@ -404,6 +429,7 @@ async function main(): Promise<void> {
         : 'fail',
     runId,
     pins: runPins,
+    harness: assembled.freeze.evidence,
     budget: {
       ...budget,
       remainingWallMsAtEnd: Math.max(0, budget.deadlineAt - Date.now()),

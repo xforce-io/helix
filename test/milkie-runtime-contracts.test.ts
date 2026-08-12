@@ -20,12 +20,16 @@ import { RecordingIOPort } from 'milkie/dist/trace/RecordingIOPort.js'
 import type { Event } from 'milkie/dist/trace/types.js'
 import { runHarness } from '../src/factorio/harness.js'
 import {
+  assembleFactorioRun,
+  createFactorioHostBundle,
+} from '../src/factorio/harness-host.js'
+import {
   finalizationEvidenceEventIds,
   traceChecksBeforeFinalization,
 } from '../src/factorio/verification.js'
 import type { RunPins } from '../src/factorio/types.js'
 
-const pins: RunPins = {
+const basePins: RunPins = {
   model: 'test-model',
   harness: 'factorio-rlm/v4',
   kernelProtocol: '2',
@@ -39,6 +43,18 @@ const pins: RunPins = {
   taskDigest: 'sha256:test-task',
   kernelMemoryBytes: 1_073_741_824,
   kernelCpuSeconds: 600,
+}
+
+function assembleTestRun() {
+  const bundle = createFactorioHostBundle()
+  return assembleFactorioRun({
+    bundle,
+    basePins,
+    baselineRef:
+      basePins.harness === 'factorio-rlm/v5'
+        ? bundle.legacyV5BaselineRef
+        : bundle.defaultBaselineRef,
+  })
 }
 
 
@@ -97,13 +113,17 @@ test('LLM deadline 在固定容差内结束并记录唯一失败 terminal', asyn
   const { port, store } = await recordingPort(new HangingGateway(), runId)
   const deadlineAt = Date.now() + 40
   const startedAt = Date.now()
+  const assembled = assembleTestRun()
   const result = await runHarness({
     runId,
     episodeId: `${runId}:episode:0`,
-    pins,
+    pins: assembled.pins,
     port,
     budget: { deadlineAt },
     control: { deadlineAt },
+    frozenHarness: assembled.frozen,
+    controlPlaneText: assembled.controlPlaneText,
+    controlPlaneContentHash: assembled.controlPlaneContentHash,
     execute: async () => {
       throw new Error('tool must not execute')
     },
@@ -135,13 +155,17 @@ test('caller cancellation 映射 unknown 终止语义且不等待 Provider', asy
   const controller = new AbortController()
   const deadlineAt = Date.now() + 2_000
   setTimeout(() => controller.abort(), 30)
+  const assembled = assembleTestRun()
   const result = await runHarness({
     runId,
     episodeId: `${runId}:episode:0`,
-    pins,
+    pins: assembled.pins,
     port,
     budget: { deadlineAt },
     control: { deadlineAt, signal: controller.signal },
+    frozenHarness: assembled.frozen,
+    controlPlaneText: assembled.controlPlaneText,
+    controlPlaneContentHash: assembled.controlPlaneContentHash,
     execute: async () => {
       throw new Error('tool must not execute')
     },
@@ -154,13 +178,17 @@ test('Tool deadline 保守映射 uncertain_effect 且 handler 不盲重试', asy
   const { port, store } = await recordingPort(new ToolGateway(), runId)
   const deadlineAt = Date.now() + 50
   let executions = 0
+  const assembled = assembleTestRun()
   const result = await runHarness({
     runId,
     episodeId: `${runId}:episode:0`,
-    pins,
+    pins: assembled.pins,
     port,
     budget: { deadlineAt },
     control: { deadlineAt },
+    frozenHarness: assembled.frozen,
+    controlPlaneText: assembled.controlPlaneText,
+    controlPlaneContentHash: assembled.controlPlaneContentHash,
     execute: async (_input, _signal) => {
       executions += 1
       return new Promise(() => undefined)

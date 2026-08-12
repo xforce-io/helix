@@ -8,6 +8,10 @@ import type {
 import type { ModelRequest, ModelResponse } from 'milkie'
 import { digest } from '../src/factorio/canonical.js'
 import { runHarness } from '../src/factorio/harness.js'
+import {
+  assembleFactorioRun,
+  createFactorioHostBundle,
+} from '../src/factorio/harness-host.js'
 import type {
   CellExecutionRecord,
   FactorioEffect,
@@ -15,7 +19,7 @@ import type {
   RunPins,
 } from '../src/factorio/types.js'
 
-const pins: RunPins = {
+const basePins: RunPins = {
   model: 'test-model',
   harness: 'factorio-rlm/v4',
   kernelProtocol: '2',
@@ -29,6 +33,18 @@ const pins: RunPins = {
   taskDigest: 'sha256:test-task',
   kernelMemoryBytes: 1_073_741_824,
   kernelCpuSeconds: 600,
+}
+
+function assembleTestRun() {
+  const bundle = createFactorioHostBundle()
+  return assembleFactorioRun({
+    bundle,
+    basePins,
+    baselineRef:
+      basePins.harness === 'factorio-rlm/v5'
+        ? bundle.legacyV5BaselineRef
+        : bundle.defaultBaselineRef,
+  })
 }
 
 
@@ -155,13 +171,17 @@ test('模型重试仍保留最近真实反馈，且大对象不进入模型上�
     toolResponse('step-call', stepCode),
   ])
   let execution = 0
+  const assembled = assembleTestRun()
   const result = await runHarness({
     runId: 'run',
     episodeId: 'run:episode:0',
-    pins,
+    pins: assembled.pins,
     port,
     budget: { deadlineAt: 10_000 },
     control: { deadlineAt: 10_000 },
+    frozenHarness: assembled.frozen,
+    controlPlaneText: assembled.controlPlaneText,
+    controlPlaneContentHash: assembled.controlPlaneContentHash,
     execute: async input => {
       execution += 1
       return record(
@@ -192,13 +212,17 @@ test('模型重试仍保留最近真实反馈，且大对象不进入模型上�
 test('真正的策略越权会立即终止模型循环', async () => {
   const code = 'factorio.step("eval(1)")'
   const port = new FakePort([toolResponse('policy-call', code)])
+  const assembled = assembleTestRun()
   const result = await runHarness({
     runId: 'run',
     episodeId: 'run:episode:0',
-    pins,
+    pins: assembled.pins,
     port,
     budget: { deadlineAt: 10_000 },
     control: { deadlineAt: 10_000 },
+    frozenHarness: assembled.frozen,
+    controlPlaneText: assembled.controlPlaneText,
+    controlPlaneContentHash: assembled.controlPlaneContentHash,
     execute: async input => ({
       schema: 'helix.cell-execution/v2',
       cellId: input.cellId,
@@ -229,13 +253,17 @@ test('真正的策略越权会立即终止模型循环', async () => {
 test('不确定环境动作立即终止模型循环且不会盲重试', async () => {
   const code = 'factorio.step("move_to(nearest(Resource.IronOre))")'
   const port = new FakePort([toolResponse('uncertain-call', code)])
+  const assembled = assembleTestRun()
   const result = await runHarness({
     runId: 'run',
     episodeId: 'run:episode:0',
-    pins,
+    pins: assembled.pins,
     port,
     budget: { deadlineAt: 10_000 },
     control: { deadlineAt: 10_000 },
+    frozenHarness: assembled.frozen,
+    controlPlaneText: assembled.controlPlaneText,
+    controlPlaneContentHash: assembled.controlPlaneContentHash,
     execute: async input => ({
       schema: 'helix.cell-execution/v2',
       cellId: input.cellId,
@@ -274,13 +302,17 @@ test('Bridge 校验错误后下一轮仍保留最近确认的 action capabilitie
     toolResponse('final-call', finalCode),
   ])
   let execution = 0
+  const assembled = assembleTestRun()
   await runHarness({
     runId: 'run',
     episodeId: 'run:episode:0',
-    pins,
+    pins: assembled.pins,
     port,
     budget: { deadlineAt: 10_000 },
     control: { deadlineAt: 10_000 },
+    frozenHarness: assembled.frozen,
+    controlPlaneText: assembled.controlPlaneText,
+    controlPlaneContentHash: assembled.controlPlaneContentHash,
     execute: async input => {
       execution += 1
       if (execution === 2) {

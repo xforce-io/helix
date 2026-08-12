@@ -1,16 +1,18 @@
 # Helix project overview
 
-Status: Factorio acceptance vertical delivered through Issues #1, #3, #5, and #7
-(RLM harness, milkie runtime control/finalization, Kernel recursive model calls,
-and persistent session / async sub-agent / mailbox). Initial delivery sequence
-items 1–2 are complete in the Factorio example; general public runtime contracts
-and sequence items 3–5 remain future work.
+Status: Factorio acceptance vertical delivered through Issues #1, #3, #5, #7,
+and #11; sequence item 3 (versioned harness state) is implemented by Issue #10
+(generic HarnessDocument / Store / run-boundary freeze; Factorio is a scenario
+adapter consumer). General public runtime contracts and sequence items 4–5
+remain future work.
 
 Approved designs:
 [Issue #1 L2](./design/1-rlm-factorio-harness.md) ·
 [Issue #3 L2](./design/3-factorio-milkie-runtime-contracts.md) ·
 [Issue #5 L2](./design/5-kernel-recursive-model-call.md) ·
-[Issue #7 L2](./design/7-session-subagent-mailbox.md).
+[Issue #7 L2](./design/7-session-subagent-mailbox.md) ·
+[Issue #10 L2](./design/10-versioned-harness-state.md) ·
+[Issue #11 L2](./design/11-runtime-capability-catalog.md).
 
 ## Examples policy
 

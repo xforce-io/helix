@@ -1,3 +1,6 @@
+import type { HarnessEvidenceSlice, HarnessPinsV1 } from '../harness/index.js'
+
+
 export interface ObjectRef {
   hash: string
   kind:
@@ -266,7 +269,16 @@ export interface CellExecutionRecord {
 
 export interface RunPins {
   model: string
+  /**
+   * Code/protocol compatibility pin (historical field name).
+   * Identifies runner/binding issuance only — not harness content identity.
+   */
   harness: 'factorio-rlm/v4' | 'factorio-rlm/v5'
+  /**
+   * Issue #10 new-format harness state pins. Present on runs assembled through
+   * Host select→validate→resolve→freeze. Content identity is harnessContentHash.
+   */
+  harnessState?: HarnessPinsV1
   kernelProtocol: '2'
   bindingSet: 'factorio/v3' | 'factorio/v4'
   renderer: 'markdown-json/v1'
@@ -337,6 +349,8 @@ export interface LiveEvidence {
   verdict: 'pass' | 'fail'
   runId: string
   pins: RunPins
+  /** Issue #10 harness evidence slice when assembled via Host freeze. */
+  harness?: HarnessEvidenceSlice
   budget: RunBudget & {
     remainingWallMsAtEnd: number
     remainingRecursiveModelTokensAtEnd?: number
