@@ -15,18 +15,43 @@ import {
   argument,
   attachEvidenceRef,
   FINALIZATION_ROOT,
+  HARNESS_STATE_ROOT,
   objectStore,
-  pins,
-  pinsSessionAsync,
   readLiveEvidence,
   REPLAY_WALL_TIMEOUT_MS,
   summarizeFinalization,
   TRACE_ROOT,
   writeEvidence,
 } from './cli-common.js'
+import {
+  formFactorioAvailableCatalogRefs,
+  openFactorioReplayHost,
+} from './harness-host.js'
+import {
+  createFactorioScenarioAdapter,
+} from './harness-document.js'
+import {
+  assertHarnessPinsEqual,
+  bindControlPlaneText,
+  HarnessError,
+  renderControlPlane,
+  replayFromLegacyPin,
+  replayFromRecordedPins,
+  type FreezeResult,
+  type HarnessEvidenceSlice,
+  type HarnessPinsV1,
+} from '../harness/index.js'
+
+import { renderCardDoc } from '../catalog/render.js'
 import { runHarness } from './harness.js'
 import { CHILD_REPLAY_SAFETY_WALL_MS } from './recursive-model.js'
-import type { CellExecutionRecord, ObjectRef, ReplayEvidence } from './types.js'
+import type {
+  CellExecutionRecord,
+  LiveEvidence,
+  ObjectRef,
+  ReplayEvidence,
+  RunPins,
+} from './types.js'
 import {
   attachTripleForbiddenCheck,
   c1NeverStartedEventCheck,
@@ -40,6 +65,152 @@ import {
   singleEffectMutualExclusionCheck,
 } from './verification.js'
 import { REPLAY_EVIDENCE_SCHEMA } from './session-async-constants.js'
+
+/**
+ * Reconstruct frozen harness + control plane for Factorio replay from live evidence.
+ * New-format artifacts require evidence.harness ≡ pins.harnessState ≡ outer
+ * codeProtocolPin identity (L2 §10.1). Legacy-only pins use the registry.
+ * Exported for live-evidence-shaped regression tests.
+ *
+ * Opens the Host durable Store/Registry in hydrate-only mode — never publishes
+ * current source default baselines or re-registers legacy mappings from source.
+ * `rootDir` defaults to the Host durable harness-state root.
+ */
+export function reconstructFactorioReplayHarness(
+  live: {
+    pins: RunPins
+    harness?: LiveEvidence['harness']
+  },
+  options: {
+    /**
+     * Durable Host state root. Defaults to HARNESS_STATE_ROOT (CLI).
+     * Pass `null` for an empty ephemeral Store (unit tests that either fail
+     * closed before Store reads, or share a pre-seeded temp durable root).
+     */
+    rootDir?: string | null
+  } = {},
+): {
+  freeze: FreezeResult
+  pins: RunPins
+  controlPlaneText: string
+  controlPlaneContentHash: string
+} {
+  const bundle =
+    options.rootDir === null
+      ? openFactorioReplayHost({ rootDir: null })
+      : openFactorioReplayHost({
+          rootDir:
+            typeof options.rootDir === 'string' && options.rootDir.length > 0
+              ? options.rootDir
+              : HARNESS_STATE_ROOT,
+        })
+  const codeProtocolPin = live.pins.harness
+  const availableCatalogRefs = formFactorioAvailableCatalogRefs(codeProtocolPin)
+
+  const evidenceHarness = live.harness
+  const pinsHarnessState = live.pins.harnessState
+
+  let freeze: FreezeResult
+  if (evidenceHarness !== undefined || pinsHarnessState !== undefined) {
+    // New-format path: require full triple consistency before model/Kernel.
+    const recordedPins = requireConsistentRecordedHarnessPins({
+      outerCodeProtocolPin: codeProtocolPin,
+      evidence: evidenceHarness,
+      pinsHarnessState,
+    })
+    freeze = replayFromRecordedPins({
+      store: bundle.store,
+      pins: recordedPins,
+      availableCatalogRefs,
+    })
+  } else {
+    // Legacy artifact: only code/protocol pin — registry is the sole path.
+    freeze = replayFromLegacyPin({
+      store: bundle.store,
+      legacyRegistry: bundle.legacyRegistry,
+      codeProtocolPin,
+      availableCatalogRefs,
+    })
+  }
+
+  const adapter = createFactorioScenarioAdapter()
+  const scenario = adapter.buildScenarioPayload({
+    frozen: freeze.frozen,
+    codeProtocolPin,
+  })
+  const catalogDocs = freeze.frozen.catalogCards.map((ref) => ({
+    ref,
+    doc: renderCardDoc(ref.id, ref.version),
+  }))
+  const controlPlaneText = renderControlPlane({
+    document: freeze.frozen.document,
+    catalogDocs,
+    scenario,
+  })
+  const controlPlaneContentHash = bindControlPlaneText(
+    freeze.frozen,
+    controlPlaneText,
+  )
+
+  const pins: RunPins = {
+    ...live.pins,
+    harnessState: freeze.pins,
+  }
+
+  return { freeze, pins, controlPlaneText, controlPlaneContentHash }
+}
+
+/**
+ * Fail-closed identity gate for new-format live evidence:
+ * evidence.harness, pins.harnessState, and outer pins.harness codeProtocolPin
+ * must be item-equal on every shared field before replay selection.
+ */
+function requireConsistentRecordedHarnessPins(input: {
+  outerCodeProtocolPin: string
+  evidence: HarnessEvidenceSlice | undefined
+  pinsHarnessState: HarnessPinsV1 | undefined
+}): HarnessPinsV1 {
+  if (input.evidence === undefined || input.pinsHarnessState === undefined) {
+    throw new HarnessError(
+      'HARNESS_REF_INVALID',
+      'new-format replay requires both evidence.harness and pins.harnessState',
+      {
+        hasEvidence: input.evidence !== undefined,
+        hasPinsHarnessState: input.pinsHarnessState !== undefined,
+      },
+    )
+  }
+  // Same-named pin fields must match exactly across evidence and pins.
+  assertHarnessPinsEqual(
+    input.pinsHarnessState,
+    input.evidence,
+    'evidence-vs-pins.harnessState',
+  )
+  if (input.pinsHarnessState.codeProtocolPin !== input.outerCodeProtocolPin) {
+    throw new HarnessError(
+      'HARNESS_PROTOCOL_INCOMPATIBLE',
+      'recorded harness codeProtocolPin does not match outer pins.harness',
+      {
+        outer: input.outerCodeProtocolPin,
+        recorded: input.pinsHarnessState.codeProtocolPin,
+      },
+    )
+  }
+  if (input.evidence.codeProtocolPin !== input.outerCodeProtocolPin) {
+    throw new HarnessError(
+      'HARNESS_PROTOCOL_INCOMPATIBLE',
+      'evidence.harness codeProtocolPin does not match outer pins.harness',
+      {
+        outer: input.outerCodeProtocolPin,
+        evidence: input.evidence.codeProtocolPin,
+      },
+    )
+  }
+  // Prefer pins.harnessState as the closed recorded selection (evidence may
+  // carry selectionSource extras already checked for pin-field equality).
+  return input.pinsHarnessState
+}
+
 
 export type ChildReplayCheck = {
   id: string
@@ -330,13 +501,11 @@ async function main(): Promise<void> {
       'live evidence pins are rejected by v4 runner (legacy or mismatched)',
     )
   }
+  // Reconstruct frozen harness solely from recorded HarnessPinsV1 / evidence.
+  // Do not regenerate pins via current pin factories.
+  const reconstructed = reconstructFactorioReplayHarness(live)
   const replayPins =
-    live.pins.sessionAsyncVersion === '1' || live.pins.harness === 'factorio-rlm/v5'
-      ? pinsSessionAsync(live.pins.model)
-      : pins(live.pins.model)
-  if (digest(replayPins) !== digest(live.pins)) {
-    throw new Error('live evidence pins do not match the current replay contract')
-  }
+    live.pins.harnessState !== undefined ? live.pins : reconstructed.pins
   const eventStore = new JsonlEventStore(TRACE_ROOT)
   const events = (await eventStore.readByRunId(runId)) as Event[]
   if (events.length === 0) throw new Error(`no milkie Trace for ${runId}`)
@@ -355,6 +524,9 @@ async function main(): Promise<void> {
       liveEffectCount += 1
       throw new Error('Kernel/FLE handler executed during replay')
     },
+    frozenHarness: reconstructed.freeze.frozen,
+    controlPlaneText: reconstructed.controlPlaneText,
+    controlPlaneContentHash: reconstructed.controlPlaneContentHash,
     recursiveModel: { enabled: true },
   })
   const remainingIO = cache.remaining()

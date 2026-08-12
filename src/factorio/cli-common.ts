@@ -2,6 +2,11 @@ import { execFileSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { FileTraceObjectStore, type TaskOutcomeFinalization } from 'milkie'
+import {
+  HarnessError,
+  parseHarnessJsonText,
+  type JsonTextValue,
+} from '../harness/index.js'
 import { canonicalJson } from './canonical.js'
 import type {
   FinalizationSummary,
@@ -16,9 +21,12 @@ export const OBJECT_ROOT = path.join(ARTIFACT_ROOT, 'objects')
 export const FINALIZATION_ROOT = path.join(ARTIFACT_ROOT, 'final-outcomes')
 /** Durable Helix session ledger/checkpoint root (Issue #7). */
 export const SESSION_STORE_ROOT = path.join(ARTIFACT_ROOT, 'sessions')
+/** Host-held immutable harness Store + legacy registry root (Issue #10). */
+export const HARNESS_STATE_ROOT = path.join(ARTIFACT_ROOT, 'harness-state')
 export const LIVE_WALL_TIMEOUT_MS = 30 * 60 * 1_000
 export const REPLAY_WALL_TIMEOUT_MS = 5 * 60 * 1_000
 export const MILKIE_COMMIT = 'd74128cf3ac976ebd68eb1b87f340574811c6366'
+
 export {
   CHILD_REPLAY_SAFETY_WALL_MS,
   CONTROL_SETTLE_TOLERANCE_MS,
@@ -179,7 +187,37 @@ export async function attachEvidenceRef<T extends LiveEvidence | ReplayEvidence>
   return { ...evidence, evidenceRef }
 }
 
+/**
+ * Read live evidence with strict harness JSON text rules before materialization.
+ * Duplicate keys / non-canonical numbers fail closed as HARNESS_JSON_INVALID.
+ */
 export async function readLiveEvidence(runId: string): Promise<LiveEvidence> {
   const file = path.join(ARTIFACT_ROOT, 'runs', runId, 'live.json')
-  return JSON.parse(await fs.readFile(file, 'utf8')) as LiveEvidence
+  const text = await fs.readFile(file, 'utf8')
+  return parseLiveEvidenceText(text)
+}
+
+/**
+ * Parse live evidence JSON text (exported for integration regressions that
+ * exercise the same gate as the CLI path without touching disk).
+ */
+export function parseLiveEvidenceText(text: string): LiveEvidence {
+  let value: JsonTextValue
+  try {
+    value = parseHarnessJsonText(text).value
+  } catch (error) {
+    if (error instanceof HarnessError) throw error
+    throw new HarnessError(
+      'HARNESS_JSON_INVALID',
+      `live evidence JSON text invalid: ${String(error)}`,
+    )
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new HarnessError(
+      'HARNESS_JSON_INVALID',
+      'live evidence root must be a JSON object',
+    )
+  }
+  // Strict text gate only; schema validation remains on consumers.
+  return value as unknown as LiveEvidence
 }

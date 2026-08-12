@@ -46,7 +46,7 @@
 
 1. 定义完整、领域无关的 `HarnessDocument`、baseline、overlay、canonical identity 与闭集覆盖规则。
 2. 定义 `HarnessStateStore` 的不可变发布、读取、选择、解析与回读语义；这些是 Host control-plane 内部操作。
-3. 将 run 生命周期锁定为 `select → validate → resolve → freeze`，并将冻结选择、resolved hash、Catalog refs 与兼容结论写入 Context、`RunPins.harness`、evidence 和 replay record；每次选择只能使用该 run 已固定 `availableCatalogRefs` 内的精确 card ref。
+3. 将 run 生命周期锁定为 `select → validate → resolve → freeze`，并将冻结选择、resolved hash、Catalog refs 与兼容结论写入 Context、`RunPins.harnessState`（`HarnessPinsV1`）、evidence 和 replay record；历史字段 `RunPins.harness` 仅保留 code/protocol 兼容 pin（`factorio-rlm/v4|v5`）。每次选择只能使用该 run 已固定 `availableCatalogRefs` 内的精确 card ref。
 4. 保持通用 core 与 scenario 的单向关系：core 只面对 `ExampleScenarioAdapter` 抽象；具体 scenario 只作为 Host 组合 consumer。
 5. 为新格式与旧格式 artifact 定义 fail-closed 的 replay 选择、迁移和错误语义。
 
@@ -331,7 +331,12 @@ resolveLegacySelection(codeProtocolPin: string): LegacySelectionRegistryEntry
 
 ### 10.1 新格式记录
 
-新 run 的 `RunPins.harness`、Context 与 evidence 都必须写入同一组值：
+新 run 必须同时记录两类 pin 字段，且不得混用：
+
+- `RunPins.harness`（历史字段名）：**仅** code/protocol 兼容 pin（如 `factorio-rlm/v4` \| `factorio-rlm/v5`），用于 runner/binding issuance，**不是** harness 内容身份。
+- `RunPins.harnessState`：冻结的 harness 内容身份 slice，类型为 `HarnessPinsV1`。
+
+Context、`RunPins.harnessState` 与 evidence 都必须写入同一组 `HarnessPinsV1` 值：
 
 ```ts
 type HarnessPinsV1 = {
@@ -349,9 +354,9 @@ type HarnessPinsV1 = {
 }
 ```
 
-Context 在 `runtime.harness` 回读该完整对象；evidence 在 `harness` 回读相同字段，并额外记录 `selectionSource: 'recorded'`。三个位置的同名字段必须逐项相等。`harnessContentHash` 必须由 Store 读出的精确载荷重新计算；不得相信外部传入摘要。
+Context 在 `runtime.harness` 回读该完整对象；evidence 在 `harness` 回读相同字段，并额外记录 `selectionSource: 'recorded'`。三个位置的同名字段必须逐项相等。`harnessContentHash` 必须由 Store 读出的精确载荷重新计算；不得相信外部传入摘要。`RunPins.harness` 必须与 `HarnessPinsV1.codeProtocolPin` 一致，但不得单独充当 state selection。
 
-新格式 replay 只读取 artifact 中的 `HarnessPinsV1` 作为 selection：Host 先从 replay run bootstrap、recorded `codeProtocolPin` 与 binding projection 形成 immutable `availableCatalogRefs`，再按 refs 从 Store 读取、核对每个 ref hash、重新 resolve，并同时比对 recorded `harnessContentHash`、schema、Catalog refs 和 compatibility decision。它不得查询 `LegacySelectionRegistry`、任何 manifest、当前默认或 `latest`；每次 resolve 都执行该 available 集 membership 检查，失败不产生 run 或 live effect。
+新格式 replay 只读取 artifact 中的 `HarnessPinsV1`（位于 `RunPins.harnessState` / evidence `harness`）作为 selection：Host 先从 replay run bootstrap、recorded `codeProtocolPin` 与 binding set 形成 immutable `availableCatalogRefs`，再按 refs 从 **已 hydrate 的 durable Store** 读取、核对每个 ref hash、重新 resolve，并同时比对 recorded `harnessContentHash`、schema、Catalog refs 和 compatibility decision。它不得查询 `LegacySelectionRegistry`、任何 manifest、当前默认或 `latest`；也不得在 replay 路径发布、比较或选择当前源码默认 baseline / legacy fixture。每次 resolve 都执行该 available 集 membership 检查，失败不产生 run 或 live effect。
 
 ### 10.2 全局 `LegacySelectionRegistry` 与 manifest provenance view
 
@@ -425,7 +430,7 @@ registry 的 key 是全局 `codeProtocolPin`；entry 不含 overlay，且每个 
 ### 11.2 S2 — 稳定加载、freeze 与回读
 
 - 预置合规 baseline V1，连续选择 V1 加空 overlay 启动 Run A1 与 Run A2。断言两个 run 的 `harnessContentHash`、baseline ref、缺省 overlay、schema、Catalog refs 和 compatibility decision 一致。
-- 每个 run 同时从 Host control-plane 读取 Store 原载荷/ref，从 Context、`RunPins.harness` 与 evidence 读取同一 harness slice；逐项相等，并断言控制面渲染来自 V1。
+- 每个 run 同时从 Host control-plane 读取 Store 原载荷/ref，从 Context、`RunPins.harnessState`（`HarnessPinsV1`）与 evidence 读取同一 harness slice；逐项相等，并断言控制面渲染来自 V1。历史字段 `RunPins.harness` 仅校验为匹配的 code/protocol pin。
 - 在 Run A1 内派生 child run，断言 child slice 与 parent 冻结 slice 相同；尝试改变 child selection 必须得到 `HARNESS_CHILD_SELECTION_DRIFT`。
 - 分别 replay A1 与 A2，断言只消费各自 recorded refs/hash，resolved identity 一致，live effect 为零，且不查询当前默认或 `latest`。
 

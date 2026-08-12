@@ -22,27 +22,16 @@ import type {
   TerminationReason,
 } from './types.js'
 import type { ExecuteCellInput } from './live-executor.js'
+import {
+  assertControlPlaneBinding,
+  assertFrozenHarnessMatchesPins,
+  type FrozenHarnessSlice,
+} from '../harness/index.js'
+
 
 export const EXECUTE_CELL_TOOL = 'execute_cell'
 export const MAX_CELLS = 16
 export const MAX_MODEL_CALLS = 16
-
-const SYSTEM_PROMPT = `You are the model that owns a persistent IPython execution session.
-Your task is to solve the real Factorio Learning Environment task shown in the ContextEnvelope.
-
-You have exactly one external tool: execute_cell(code). Every call runs one Python cell in the same persistent IPython namespace. You—not the harness—must write every cell and every Factorio action program.
-
-Protocol:
-1. Your first environment effect must be a cell containing factorio.reset(). Read its returned task information, inventory, positions, and verification state.
-2. On later turns, use the actual prior cell result to decide the next cell. Submit at most one external effect per cell: either factorio.reset()/factorio.step(program) OR helix.models.call(...), never both in the same cell.
-3. factorio.step accepts a Python source string executed in FLE's public namespace. Resource, Prototype, Direction, Position, and BuildingBox are already defined there—NEVER add import statements inside the action string. After reset, factorioEffect.actionCapabilities is the canonical allowlist. Call only names in that list; never guess an API name. Useful signatures include nearest(Resource.IronOre), move_to(Position(...)), place_entity(Prototype.X, direction=Direction.DOWN, position=Position(...)), place_entity_next_to(Prototype.X, reference_position, Direction.DOWN), insert_item(Prototype.Coal, target_entity, quantity=50), get_entities(), pickup_entity(entity), and nearest_buildable(prototype, BuildingBox(width=..., height=...), center_position).
-4. When capabilities.recursiveModel.enabled is true, you may call helix.models.call(instructions, input=None, max_output_tokens=None) in its own cell to run a bounded recursive model query. It returns a RecursiveModelResult with status/text/usage/child_run_id/response_ref. Read those fields in later cells; do not expect the full response to be expanded into outer context automatically. Recursive calls share the parent remainingRecursiveModelTokens pool and remainingRecursiveModelCalls count.
-5. Imports in either the outer cell or action string, files, shell/process/network APIs, dynamic execution, private attributes, and raw RCON are forbidden. A policy violation terminates the run. Keep an action program below 10,000 characters.
-6. Inspect errors and observations and correct your program. Continue until task_verification.success is true. Do not claim success yourself; only the environment verifier decides.
-
-Call factorio.reset() exactly once, in the first cell. Never reset again after it succeeds.
-
-Use execute_cell for action, not prose. Never ask the harness to provide a solution.`
 
 export interface HarnessOptions {
   runId: string
@@ -52,6 +41,23 @@ export interface HarnessOptions {
   budget: RunBudget
   control: IOInvocationControl
   execute: (input: ExecuteCellInput, signal?: AbortSignal) => Promise<CellExecutionRecord>
+  /**
+   * Frozen harness slice from Host select→validate→resolve→freeze (or recorded replay).
+   * Required — production runs must not fall back to source prompts.
+   */
+  frozenHarness: FrozenHarnessSlice
+  /**
+   * Complete frozen control-plane text from renderControlPlane (§4.5 order):
+   * system + task/protocol/termination + catalog docs + agentSpecs + scenario.
+   * Injected as the ModelRequest system field. Must be Host-bound for the
+   * same frozenHarness identity via controlPlaneContentHash.
+   */
+  controlPlaneText: string
+  /**
+   * Host-issued binding hash of controlPlaneText for this frozenHarness.
+   * Rejects independent/forged system text even when pins match.
+   */
+  controlPlaneContentHash: string
   /** Optional overrides for recursive model budget projection. */
   recursiveModel?: {
     enabled?: boolean
@@ -167,6 +173,7 @@ function contextEnvelope(
   recursiveEnabled: boolean,
   maxRecursiveCalls: number,
   maxCompletionTokens: number,
+  frozenHarness: FrozenHarnessSlice,
   sessionAsync?: {
     enabled: boolean
     maxActiveHandles: number
@@ -183,6 +190,10 @@ function contextEnvelope(
   const remainingCalls = Math.max(0, maxRecursiveCalls - projection.recursiveCallCount)
   const schema =
     pins.sessionAsyncVersion === '1' ? 'helix.context/v4' : 'helix.context/v3'
+  const taskInstruction = frozenHarness.document.control.taskNarrativeTemplate
+  // pins.harnessState is required and equality-gated against frozenHarness
+  // before the first model request; Context always records that same slice.
+  const harnessSlice = pins.harnessState!
   return {
     schema,
     runtime: {
@@ -190,11 +201,11 @@ function contextEnvelope(
       episodeId: projection.episodeId,
       kernelRevision: projection.kernelRevision,
       pins,
+      harness: harnessSlice,
     },
     task: {
       id: pins.taskId,
-      instruction:
-        'Create an automatic iron-ore factory that produces at least 16 iron-ore per 60 in-game seconds.',
+      instruction: taskInstruction,
       acceptance: 'task_verification.success=true',
       trajectoryLength: 64,
     },
@@ -398,11 +409,43 @@ function verificationFrom(projection: EpisodeProjection): TaskVerification {
 }
 
 export async function runHarness(options: HarnessOptions): Promise<HarnessResult> {
+  if (
+    options.frozenHarness === undefined ||
+    options.frozenHarness === null ||
+    typeof options.controlPlaneText !== 'string' ||
+    options.controlPlaneText.length === 0
+  ) {
+    throw new Error(
+      'runHarness requires frozenHarness and non-empty controlPlaneText from Host freeze; source-prompt fallback is forbidden',
+    )
+  }
+  if (options.pins.harnessState === undefined) {
+    throw new Error(
+      'runHarness requires pins.harnessState from Host freeze; code/protocol pin alone is not a state selection',
+    )
+  }
+  // L2 §10.1 + ship-review: Context/pins/evidence share one frozen slice, and
+  // controlPlaneText must be the Host-bound payload for that slice. Gate before
+  // any model request so callers cannot pair freeze/pins A with system text B.
+  assertControlPlaneBinding({
+    frozen: options.frozenHarness,
+    pins: options.pins.harnessState,
+    controlPlaneText: options.controlPlaneText,
+    controlPlaneContentHash: options.controlPlaneContentHash,
+    label: 'runHarness.control-plane',
+  })
+  // Keep explicit pins gate for clearer frozen-vs-pins mismatch diagnostics.
+  assertFrozenHarnessMatchesPins(
+    options.frozenHarness,
+    options.pins.harnessState,
+    'runHarness.frozenHarness-vs-pins.harnessState',
+  )
   const recursiveEnabled = options.recursiveModel?.enabled !== false
   const initialRecursiveTokens =
     options.recursiveModel?.initialTokens ?? DEFAULT_PARENT_RECURSIVE_TOKEN_POOL
   const maxRecursiveCalls =
     options.recursiveModel?.maxCalls ?? MAX_RECURSIVE_CALLS_PER_RUN
+  const systemInstruction = options.controlPlaneText
 
   let projection = initialProjection(
     options.runId,
@@ -452,6 +495,7 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
       recursiveEnabled,
       maxRecursiveCalls,
       MAX_RECURSIVE_COMPLETION_TOKENS,
+      options.frozenHarness,
     )
     const envelopeText = renderEnvelope(envelope)
     const messages = [
@@ -475,7 +519,7 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
 
     const request: ModelRequest = {
       model: options.pins.model,
-      system: SYSTEM_PROMPT,
+      system: systemInstruction,
       messages: [...messages],
       tools: [
         {
@@ -503,6 +547,7 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
         contextEnvelopeDigest: digest(envelope),
         pinsDigest: digest(options.pins),
         modelOrdinal,
+        harnessContentHash: options.frozenHarness.harnessContentHash,
       },
     }
     let response: ModelResponse
