@@ -57,6 +57,7 @@ import type {
   SessionAsyncCapability,
   SessionEffect,
 } from './types.js'
+import type { FrozenHarnessSlice, HarnessPinsV1 } from '../harness/index.js'
 /** Same shape as live-executor ChildPortFactory (avoid circular import). */
 export type SessionChildPortFactory = (args: {
   childRunId: string
@@ -66,6 +67,9 @@ export type SessionChildPortFactory = (args: {
   /** Non-secret attach/input payload — never a capability token. */
   input: string
   agentId: string
+  /** Optional inherited frozen harness identity (Issue #10 child slice). */
+  frozenHarness?: FrozenHarnessSlice
+  harnessState?: HarnessPinsV1
   /**
    * Host-private child session binding. MUST NOT be copied into attach,
    * trace payloads, or invokeLLM request bodies.

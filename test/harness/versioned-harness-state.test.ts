@@ -28,6 +28,9 @@ import {
   HarnessError,
   HarnessStateStore,
   inheritFrozenHarnessSlice,
+  childRecordedFromFrozen,
+  normalizePinsV1,
+  normalizeEvidenceHarness,
   LEGACY_SELECTION_REGISTRY_IDENTITY,
   LegacySelectionRegistryStore,
   materializeHarnessRecord,
@@ -67,6 +70,12 @@ import {
 } from '../../src/factorio/cli-common.js'
 import { runHarness } from '../../src/factorio/harness.js'
 import { reconstructFactorioReplayHarness } from '../../src/factorio/replay.js'
+import {
+  LiveCellExecutor,
+  type ChildPortFactory,
+  type ChildPortHandle,
+} from '../../src/factorio/live-executor.js'
+import { MemoryTraceObjectStore } from 'milkie'
 
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..')
@@ -1573,6 +1582,42 @@ test('review.replay-rejects-evidence-pins-outer-code-pin-inconsistency', () => {
   )
 })
 
+test('review.replay-rejects-legacy-registry-provenance-on-new-format', () => {
+  // New-format recorded-pins path must declare selectionSource=recorded.
+  // legacy-registry + registryIdentity is legacy-only provenance and must fail
+  // closed before Store resolve/effect (L2 §10.1).
+  const root = mkdtempSync(join(tmpdir(), 'helix-factorio-legacy-prov-'))
+  try {
+    const bundle = createFactorioHostBundle({ rootDir: root })
+    const liveAssembled = assembleFactorioRun({
+      bundle,
+      basePins: pinsV4('legacy-prov-model'),
+      baselineRef: bundle.defaultBaselineRef,
+    })
+    assert.ok(liveAssembled.pins.harnessState)
+    assert.equal(liveAssembled.freeze.evidence.selectionSource, 'recorded')
+
+    const forgedLegacyProvenance = {
+      pins: liveAssembled.pins,
+      harness: {
+        ...liveAssembled.freeze.evidence,
+        selectionSource: 'legacy-registry' as const,
+        registryIdentity: { ...LEGACY_SELECTION_REGISTRY_IDENTITY },
+      },
+    }
+    expectHarnessError(
+      () =>
+        reconstructFactorioReplayHarness(forgedLegacyProvenance, {
+          rootDir: root,
+        }),
+      'HARNESS_REF_INVALID',
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+
 test('review.durable-store-process-boundary-v1-v2-v3-replay', () => {
   const root = mkdtempSync(join(tmpdir(), 'helix-harness-durable-'))
   try {
@@ -2941,4 +2986,457 @@ test('review.control-plane-binding-write-once-rejects-forged-rebind', async () =
   assert.equal(validInvoked, true)
 })
 
+
+// ---------------------------------------------------------------------------
+// Review remediation B1/B2 — real child inheritance + closed replay pins
+// ---------------------------------------------------------------------------
+
+test('review.B1.recursive-child-inherits-parent-frozen-slice-before-llm', async () => {
+  const bundle = createFactorioHostBundle()
+  const assembled = assembleFactorioRun({
+    bundle,
+    basePins: pinsV4('child-inherit-model'),
+    baselineRef: bundle.defaultBaselineRef,
+  })
+  assert.ok(assembled.pins.harnessState)
+
+  let factorySawHarness = false
+  let llmInvoked = false
+  let observedChildHash: string | undefined
+  let observedChildStateHash: string | undefined
+
+  const childPortFactory: ChildPortFactory = async args => {
+    factorySawHarness = args.frozenHarness !== undefined && args.harnessState !== undefined
+    assert.ok(args.frozenHarness)
+    assert.ok(args.harnessState)
+    assert.equal(args.frozenHarness.harnessContentHash, assembled.frozen.harnessContentHash)
+    assert.equal(args.harnessState.harnessContentHash, assembled.frozen.harnessContentHash)
+    assert.deepEqual(args.harnessState.baselineRef, assembled.frozen.selection.baselineRef)
+    assert.deepEqual(args.harnessState.catalogCards, assembled.frozen.catalogCards)
+    assert.deepEqual(
+      args.harnessState.compatibilityDecision,
+      assembled.frozen.compatibilityDecision,
+    )
+    observedChildHash = args.frozenHarness.harnessContentHash
+    observedChildStateHash = args.harnessState.harnessContentHash
+    const port = {
+      async invokeLLM(request: ModelRequest): Promise<ModelResponse> {
+        llmInvoked = true
+        const meta = (request.metadata ?? {}) as Record<string, unknown>
+        assert.equal(meta['harnessContentHash'], assembled.frozen.harnessContentHash)
+        const hs = meta['harnessState'] as { harnessContentHash?: string } | undefined
+        assert.equal(hs?.harnessContentHash, assembled.frozen.harnessContentHash)
+        return {
+          content: [{ type: 'text', text: 'child-ok' }],
+          toolCalls: [],
+          usage: { inputTokens: 1, outputTokens: 1 },
+          finishReason: 'end_turn',
+        }
+      },
+      async invokeTool(): Promise<unknown> {
+        throw new Error('not used')
+      },
+      now: () => Date.now(),
+      uuid: () => '00000000-0000-4000-8000-000000000099',
+    }
+    const handle: ChildPortHandle = {
+      port,
+      attached: true,
+      detach: async () => undefined,
+    }
+    return handle
+  }
+
+  class TestableExecutor extends LiveCellExecutor {
+    async callModels(params: Record<string, unknown>, cellId = 'cell-0') {
+      const handle = (
+        this as unknown as {
+          handleModelsCall: (
+            frame: Record<string, unknown>,
+            cellId: string,
+          ) => Promise<{ result: unknown; modelEffect: unknown }>
+        }
+      ).handleModelsCall.bind(this)
+      return handle({ method: 'models.call', params }, cellId)
+    }
+  }
+
+  const store = new MemoryTraceObjectStore()
+  const executor = new TestableExecutor(
+    'parent-b1',
+    'parent-b1:episode:0',
+    assembled.pins,
+    store,
+    {
+      recursiveModelEnabled: true,
+      recursiveTokenPool: 2000,
+      frozenHarness: assembled.frozen,
+      childPortFactory,
+    },
+  )
+  const { result } = await executor.callModels({ instructions: 'advise next action' })
+  assert.equal((result as { status: string }).status, 'succeeded')
+  assert.equal(factorySawHarness, true)
+  assert.equal(llmInvoked, true)
+  assert.equal(observedChildHash, assembled.frozen.harnessContentHash)
+  assert.equal(observedChildStateHash, assembled.frozen.harnessContentHash)
+  assert.deepEqual(executor.childRunIds, ['parent-b1:rmc:0'])
+})
+
+test('review.B1.recursive-child-rejects-harnessState-drift-before-llm', async () => {
+  const bundle = createFactorioHostBundle()
+  const assembled = assembleFactorioRun({
+    bundle,
+    basePins: pinsV4('child-drift-model'),
+    baselineRef: bundle.defaultBaselineRef,
+  })
+  assert.ok(assembled.pins.harnessState)
+
+  // Deliberately drift recorded pins.harnessState while keeping frozen parent slice.
+  const driftedPins = {
+    ...assembled.pins,
+    harnessState: {
+      ...assembled.pins.harnessState!,
+      harnessContentHash: '0'.repeat(64),
+    },
+  }
+
+  let llmInvoked = false
+  let factoryCalled = false
+  const childPortFactory: ChildPortFactory = async () => {
+    factoryCalled = true
+    return {
+      port: {
+        async invokeLLM() {
+          llmInvoked = true
+          throw new Error('child LLM must not run on harness drift')
+        },
+        async invokeTool() {
+          throw new Error('not used')
+        },
+        now: () => 0,
+        uuid: () => 'u',
+      },
+      attached: true,
+      detach: async () => undefined,
+    }
+  }
+
+  class TestableExecutor extends LiveCellExecutor {
+    async callModels(params: Record<string, unknown>, cellId = 'cell-0') {
+      const handle = (
+        this as unknown as {
+          handleModelsCall: (
+            frame: Record<string, unknown>,
+            cellId: string,
+          ) => Promise<{ result: unknown; modelEffect: unknown }>
+        }
+      ).handleModelsCall.bind(this)
+      return handle({ method: 'models.call', params }, cellId)
+    }
+  }
+
+  const store = new MemoryTraceObjectStore()
+  const executor = new TestableExecutor(
+    'parent-drift',
+    'parent-drift:episode:0',
+    driftedPins,
+    store,
+    {
+      recursiveModelEnabled: true,
+      recursiveTokenPool: 2000,
+      frozenHarness: assembled.frozen,
+      childPortFactory,
+    },
+  )
+
+  await assert.rejects(
+    () => executor.callModels({ instructions: 'should fail closed before child llm' }),
+    (error: unknown) => {
+      assert.ok(error instanceof HarnessError, String(error))
+      assert.equal(error.code, 'HARNESS_CHILD_SELECTION_DRIFT')
+      return true
+    },
+  )
+  assert.equal(factoryCalled, false)
+  assert.equal(llmInvoked, false)
+  assert.equal(executor.recursiveProviderCalls, 0)
+  assert.deepEqual(executor.childRunIds, [])
+})
+
+test('review.B2.normalizePinsV1-rejects-closed-schema-violations', () => {
+  const bundle = createFactorioHostBundle()
+  const assembled = assembleFactorioRun({
+    bundle,
+    basePins: pinsV4('pins-closed-model'),
+    baselineRef: bundle.defaultBaselineRef,
+  })
+  const good = assembled.pins.harnessState!
+  // Positive path still accepts honest pins.
+  assert.equal(normalizePinsV1(good).harnessContentHash, good.harnessContentHash)
+
+  // Unknown top-level key.
+  expectHarnessError(
+    () => normalizePinsV1({ ...good, extraTop: true }),
+    'HARNESS_REF_INVALID',
+  )
+
+  // Nested unknown field on baselineRef.
+  expectHarnessError(
+    () =>
+      normalizePinsV1({
+        ...good,
+        baselineRef: { ...good.baselineRef, extra: 1 },
+      }),
+    'HARNESS_REF_INVALID',
+  )
+
+  // Nested unknown field on catalogCards entry.
+  expectHarnessError(
+    () =>
+      normalizePinsV1({
+        ...good,
+        catalogCards: good.catalogCards.map((c) => ({ ...c, extra: 'x' })),
+      }),
+    'HARNESS_CATALOG_UNRESOLVED',
+  )
+
+  // Nested unknown field on compatibilityDecision.
+  expectHarnessError(
+    () =>
+      normalizePinsV1({
+        ...good,
+        compatibilityDecision: {
+          ...good.compatibilityDecision,
+          extraFlag: true,
+        },
+      }),
+    'HARNESS_PROTOCOL_INCOMPATIBLE',
+  )
+
+  // Invalid harnessContentHash: uppercase hex / non-hex / wrong length.
+  expectHarnessError(
+    () => normalizePinsV1({ ...good, harnessContentHash: 'A'.repeat(64) }),
+    'HARNESS_REF_INVALID',
+  )
+  expectHarnessError(
+    () => normalizePinsV1({ ...good, harnessContentHash: 'g'.repeat(64) }),
+    'HARNESS_REF_INVALID',
+  )
+  expectHarnessError(
+    () => normalizePinsV1({ ...good, harnessContentHash: 'ab'.repeat(31) }),
+    'HARNESS_REF_INVALID',
+  )
+
+  // Empty catalog ref id/version.
+  expectHarnessError(
+    () =>
+      normalizePinsV1({
+        ...good,
+        catalogCards: [{ id: '', version: '1.0.0' }],
+      }),
+    'HARNESS_CATALOG_UNRESOLVED',
+  )
+  expectHarnessError(
+    () =>
+      normalizePinsV1({
+        ...good,
+        catalogCards: [{ id: 'helix.models', version: '' }],
+      }),
+    'HARNESS_CATALOG_UNRESOLVED',
+  )
+
+  // Duplicate catalog refs.
+  const card = good.catalogCards[0]!
+  expectHarnessError(
+    () =>
+      normalizePinsV1({
+        ...good,
+        catalogCards: [card, { ...card }],
+      }),
+    'HARNESS_CATALOG_UNRESOLVED',
+  )
+
+  // Invalid compatibility field values (not true).
+  expectHarnessError(
+    () =>
+      normalizePinsV1({
+        ...good,
+        compatibilityDecision: {
+          documentAcceptsCodeProtocolPin: false,
+          catalogResolved: true,
+        },
+      }),
+    'HARNESS_PROTOCOL_INCOMPATIBLE',
+  )
+})
+
+test('review.B2.replay-rejects-corrupted-HarnessPinsV1-and-evidence-extensions', () => {
+  const bundle = createFactorioHostBundle()
+  const liveAssembled = assembleFactorioRun({
+    bundle,
+    basePins: pinsV4('replay-closed-model'),
+    baselineRef: bundle.defaultBaselineRef,
+  })
+  assert.ok(liveAssembled.pins.harnessState)
+  const evidence = liveAssembled.freeze.evidence
+
+  // Unknown top-level key on pins.harnessState.
+  expectHarnessError(
+    () =>
+      reconstructFactorioReplayHarness(
+        {
+          pins: {
+            ...liveAssembled.pins,
+            harnessState: {
+              ...liveAssembled.pins.harnessState!,
+              forged: true,
+            } as typeof liveAssembled.pins.harnessState,
+          },
+          harness: evidence,
+        },
+        { rootDir: null },
+      ),
+    'HARNESS_REF_INVALID',
+  )
+
+  // Invalid harnessContentHash shape on pins (non-hex).
+  expectHarnessError(
+    () =>
+      reconstructFactorioReplayHarness(
+        {
+          pins: {
+            ...liveAssembled.pins,
+            harnessState: {
+              ...liveAssembled.pins.harnessState!,
+              harnessContentHash: 'ZZ'.repeat(32),
+            },
+          },
+          harness: {
+            ...evidence,
+            harnessContentHash: 'ZZ'.repeat(32),
+          },
+        },
+        { rootDir: null },
+      ),
+    'HARNESS_REF_INVALID',
+  )
+
+  // Empty / duplicate catalog refs on pins.
+  const card = liveAssembled.pins.harnessState!.catalogCards[0]!
+  expectHarnessError(
+    () =>
+      reconstructFactorioReplayHarness(
+        {
+          pins: {
+            ...liveAssembled.pins,
+            harnessState: {
+              ...liveAssembled.pins.harnessState!,
+              catalogCards: [{ id: '', version: '1.0.0' }],
+            },
+          },
+          harness: {
+            ...evidence,
+            catalogCards: [{ id: '', version: '1.0.0' }],
+          },
+        },
+        { rootDir: null },
+      ),
+    'HARNESS_CATALOG_UNRESOLVED',
+  )
+  expectHarnessError(
+    () =>
+      reconstructFactorioReplayHarness(
+        {
+          pins: {
+            ...liveAssembled.pins,
+            harnessState: {
+              ...liveAssembled.pins.harnessState!,
+              catalogCards: [card, { ...card }],
+            },
+          },
+          harness: {
+            ...evidence,
+            catalogCards: [card, { ...card }],
+          },
+        },
+        { rootDir: null },
+      ),
+    'HARNESS_CATALOG_UNRESOLVED',
+  )
+
+  // Extra nested key on catalog card.
+  expectHarnessError(
+    () =>
+      reconstructFactorioReplayHarness(
+        {
+          pins: {
+            ...liveAssembled.pins,
+            harnessState: {
+              ...liveAssembled.pins.harnessState!,
+              catalogCards: [{ ...card, extra: 'nope' } as typeof card],
+            },
+          },
+          harness: {
+            ...evidence,
+            catalogCards: [{ ...card, extra: 'nope' } as typeof card],
+          },
+        },
+        { rootDir: null },
+      ),
+    'HARNESS_CATALOG_UNRESOLVED',
+  )
+
+  // Invalid compatibilityDecision nested unknown field.
+  expectHarnessError(
+    () =>
+      reconstructFactorioReplayHarness(
+        {
+          pins: {
+            ...liveAssembled.pins,
+            harnessState: {
+              ...liveAssembled.pins.harnessState!,
+              compatibilityDecision: {
+                ...liveAssembled.pins.harnessState!.compatibilityDecision,
+                extra: true,
+              } as typeof liveAssembled.pins.harnessState.compatibilityDecision,
+            },
+          },
+          harness: {
+            ...evidence,
+            compatibilityDecision: {
+              ...evidence.compatibilityDecision,
+              extra: true,
+            } as typeof evidence.compatibilityDecision,
+          },
+        },
+        { rootDir: null },
+      ),
+    'HARNESS_PROTOCOL_INCOMPATIBLE',
+  )
+
+  // Evidence unknown extension beyond selectionSource/registryIdentity.
+  expectHarnessError(
+    () =>
+      reconstructFactorioReplayHarness(
+        {
+          pins: liveAssembled.pins,
+          harness: {
+            ...evidence,
+            unexpectedExt: 1,
+          } as typeof evidence,
+        },
+        { rootDir: null },
+      ),
+    'HARNESS_REF_INVALID',
+  )
+
+  // normalizeEvidenceHarness positive + unknown key.
+  const okEvidence = normalizeEvidenceHarness(evidence)
+  assert.equal(okEvidence.selectionSource, 'recorded')
+  expectHarnessError(
+    () => normalizeEvidenceHarness({ ...evidence, nope: true }),
+    'HARNESS_REF_INVALID',
+  )
+})
 

@@ -2,7 +2,7 @@
  * Host control-plane: availableCatalogRefs bootstrap + select→validate→resolve→freeze.
  */
 
-import { cloneJson, deepFreezeJson, harnessContentHash } from './canonical.js'
+import { cloneJson, deepFreezeJson, harnessContentHash, isContentHash } from './canonical.js'
 import {
   assertCardsAvailable,
   dedupeCatalogRefs,
@@ -327,11 +327,35 @@ function freezeResolved(
   )
 }
 
-function normalizePinsV1(raw: unknown): HarnessPinsV1 {
+/**
+ * Closed-schema normalize for recorded HarnessPinsV1 (replay / external artifacts).
+ * Rejects unknown top-level and nested fields, empty/duplicate catalog refs,
+ * and non-lowercase-hex 64-char harnessContentHash.
+ */
+export function normalizePinsV1(raw: unknown): HarnessPinsV1 {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw harnessError('HARNESS_SELECTION_REQUIRED', 'recorded pins must be an object')
   }
   const p = raw as Record<string, unknown>
+  const allowedTop: Record<string, true> = {
+    format: true,
+    codeProtocolPin: true,
+    baselineRef: true,
+    overlayRef: true,
+    harnessContentHash: true,
+    schemaVersion: true,
+    catalogCards: true,
+    compatibilityDecision: true,
+  }
+  for (const key of Object.keys(p)) {
+    if (allowedTop[key] !== true) {
+      throw harnessError(
+        'HARNESS_REF_INVALID',
+        `recorded pins has unknown field '${key}'`,
+        { path: 'pins', key },
+      )
+    }
+  }
   if (p['format'] !== 'harness/v1') {
     throw harnessError('HARNESS_SELECTION_REQUIRED', 'recorded pins.format must be harness/v1')
   }
@@ -347,10 +371,11 @@ function normalizePinsV1(raw: unknown): HarnessPinsV1 {
       'recorded pins.codeProtocolPin missing',
     )
   }
-  if (typeof p['harnessContentHash'] !== 'string' || p['harnessContentHash'].length !== 64) {
+  if (!isContentHash(p['harnessContentHash'])) {
     throw harnessError(
       'HARNESS_REF_INVALID',
-      'recorded pins.harnessContentHash invalid',
+      'recorded pins.harnessContentHash must be 64 lowercase hex chars',
+      { harnessContentHash: p['harnessContentHash'] },
     )
   }
   const baselineRef = requireHarnessStateRef(p['baselineRef'], 'pins.baselineRef')
@@ -367,29 +392,45 @@ function normalizePinsV1(raw: unknown): HarnessPinsV1 {
   if (!Array.isArray(p['catalogCards'])) {
     throw harnessError('HARNESS_CATALOG_UNRESOLVED', 'pins.catalogCards must be an array')
   }
-  const catalogCards = p['catalogCards'].map((c, i) => {
-    if (c === null || typeof c !== 'object' || Array.isArray(c)) {
+  const catalogCards: CatalogCardRef[] = []
+  const seenCards = new Set<string>()
+  for (let i = 0; i < p['catalogCards'].length; i += 1) {
+    const cardResult = validateCatalogCardRef(
+      p['catalogCards'][i],
+      `pins.catalogCards[${i}]`,
+    )
+    if (!cardResult.ok) throwFail(cardResult)
+    const key = `${cardResult.value.id}@${cardResult.value.version}`
+    if (seenCards.has(key)) {
       throw harnessError(
         'HARNESS_CATALOG_UNRESOLVED',
-        `pins.catalogCards[${i}] invalid`,
+        `pins.catalogCards contains duplicate entry ${key}`,
+        { path: `pins.catalogCards[${i}]`, key },
       )
     }
-    const card = c as Record<string, unknown>
-    if (typeof card['id'] !== 'string' || typeof card['version'] !== 'string') {
-      throw harnessError(
-        'HARNESS_CATALOG_UNRESOLVED',
-        `pins.catalogCards[${i}] requires id and version`,
-      )
-    }
-    return { id: card['id'], version: card['version'] }
-  })
+    seenCards.add(key)
+    catalogCards.push(cardResult.value)
+  }
   const decision = p['compatibilityDecision']
+  if (decision === null || typeof decision !== 'object' || Array.isArray(decision)) {
+    throw harnessError(
+      'HARNESS_PROTOCOL_INCOMPATIBLE',
+      'pins.compatibilityDecision invalid',
+    )
+  }
+  const decisionObj = decision as Record<string, unknown>
+  for (const key of Object.keys(decisionObj)) {
+    if (key !== 'documentAcceptsCodeProtocolPin' && key !== 'catalogResolved') {
+      throw harnessError(
+        'HARNESS_PROTOCOL_INCOMPATIBLE',
+        `pins.compatibilityDecision has unknown field '${key}'`,
+        { path: 'pins.compatibilityDecision', key },
+      )
+    }
+  }
   if (
-    decision === null ||
-    typeof decision !== 'object' ||
-    Array.isArray(decision) ||
-    (decision as Record<string, unknown>)['documentAcceptsCodeProtocolPin'] !== true ||
-    (decision as Record<string, unknown>)['catalogResolved'] !== true
+    decisionObj['documentAcceptsCodeProtocolPin'] !== true ||
+    decisionObj['catalogResolved'] !== true
   ) {
     throw harnessError(
       'HARNESS_PROTOCOL_INCOMPATIBLE',
@@ -411,6 +452,137 @@ function normalizePinsV1(raw: unknown): HarnessPinsV1 {
   if (overlayRef !== undefined) pins.overlayRef = overlayRef
   return pins
 }
+
+/**
+ * Closed-schema normalize for evidence.harness.
+ * Same pin fields as HarnessPinsV1 plus documented extensions:
+ * selectionSource and optional registryIdentity.
+ */
+export function normalizeEvidenceHarness(raw: unknown): HarnessEvidenceSlice {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw harnessError('HARNESS_SELECTION_REQUIRED', 'evidence.harness must be an object')
+  }
+  const e = raw as Record<string, unknown>
+  const allowedTop: Record<string, true> = {
+    format: true,
+    codeProtocolPin: true,
+    baselineRef: true,
+    overlayRef: true,
+    harnessContentHash: true,
+    schemaVersion: true,
+    catalogCards: true,
+    compatibilityDecision: true,
+    selectionSource: true,
+    registryIdentity: true,
+  }
+  for (const key of Object.keys(e)) {
+    if (allowedTop[key] !== true) {
+      throw harnessError(
+        'HARNESS_REF_INVALID',
+        `evidence.harness has unknown field '${key}'`,
+        { path: 'evidence.harness', key },
+      )
+    }
+  }
+  const selectionSource = e['selectionSource']
+  if (selectionSource !== 'recorded' && selectionSource !== 'legacy-registry') {
+    throw harnessError(
+      'HARNESS_REF_INVALID',
+      'evidence.harness.selectionSource must be recorded|legacy-registry',
+    )
+  }
+  // Strip evidence-only fields, then reuse pins closed validator.
+  const {
+    selectionSource: _ss,
+    registryIdentity: rawRegistryIdentity,
+    ...pinFields
+  } = e
+  const pins = normalizePinsV1(pinFields)
+  let registryIdentity: HarnessEvidenceSlice['registryIdentity']
+  if (rawRegistryIdentity !== undefined) {
+    if (
+      rawRegistryIdentity === null ||
+      typeof rawRegistryIdentity !== 'object' ||
+      Array.isArray(rawRegistryIdentity)
+    ) {
+      throw harnessError(
+        'HARNESS_REF_INVALID',
+        'evidence.harness.registryIdentity must be an object',
+      )
+    }
+    const ri = rawRegistryIdentity as Record<string, unknown>
+    for (const key of Object.keys(ri)) {
+      if (key !== 'id' && key !== 'schemaVersion') {
+        throw harnessError(
+          'HARNESS_REF_INVALID',
+          `evidence.harness.registryIdentity has unknown field '${key}'`,
+          { path: 'evidence.harness.registryIdentity', key },
+        )
+      }
+    }
+    if (
+      ri['id'] !== LEGACY_SELECTION_REGISTRY_IDENTITY.id ||
+      ri['schemaVersion'] !== LEGACY_SELECTION_REGISTRY_IDENTITY.schemaVersion
+    ) {
+      throw harnessError(
+        'HARNESS_REF_INVALID',
+        'evidence.harness.registryIdentity does not match global registry identity',
+      )
+    }
+    registryIdentity = {
+      id: LEGACY_SELECTION_REGISTRY_IDENTITY.id,
+      schemaVersion: LEGACY_SELECTION_REGISTRY_IDENTITY.schemaVersion,
+    }
+  }
+  if (selectionSource === 'recorded' && registryIdentity !== undefined) {
+    throw harnessError(
+      'HARNESS_REF_INVALID',
+      'evidence.harness.registryIdentity is only valid with selectionSource=legacy-registry',
+    )
+  }
+  if (selectionSource === 'legacy-registry' && registryIdentity === undefined) {
+    throw harnessError(
+      'HARNESS_REF_INVALID',
+      'evidence.harness.registryIdentity required when selectionSource=legacy-registry',
+    )
+  }
+  return {
+    ...pins,
+    selectionSource,
+    ...(registryIdentity !== undefined ? { registryIdentity } : {}),
+  }
+}
+
+/** Build the child-recorded identity fields from a parent frozen slice. */
+export function childRecordedFromFrozen(
+  parent: FrozenHarnessSlice,
+): {
+  selection: FrozenHarnessSlice['selection']
+  harnessContentHash: string
+  schemaVersion: FrozenHarnessSlice['schemaVersion']
+  catalogCards: FrozenHarnessSlice['catalogCards']
+  compatibilityDecision: FrozenHarnessSlice['compatibilityDecision']
+  codeProtocolPin: string
+} {
+  return {
+    selection: {
+      baselineRef: parent.selection.baselineRef,
+      ...(parent.selection.overlayRef !== undefined
+        ? { overlayRef: parent.selection.overlayRef }
+        : {}),
+    },
+    harnessContentHash: parent.harnessContentHash,
+    schemaVersion: parent.schemaVersion,
+    catalogCards: parent.catalogCards.map((c) => ({ id: c.id, version: c.version })),
+    compatibilityDecision: {
+      documentAcceptsCodeProtocolPin:
+        parent.compatibilityDecision.documentAcceptsCodeProtocolPin,
+      catalogResolved: parent.compatibilityDecision.catalogResolved,
+    },
+    codeProtocolPin: parent.codeProtocolPin,
+  }
+}
+
 
 function assertResolvedMatchesRecorded(
   resolved: ResolvedHarness,

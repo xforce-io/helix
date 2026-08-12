@@ -134,6 +134,8 @@ async function main(): Promise<void> {
     goal: string
     input: string
     agentId: string
+    frozenHarness?: (typeof assembled)['frozen']
+    harnessState?: (typeof assembled)['pins']['harnessState']
     sessionBootstrap?: {
       sessionId: string
       handleId: string
@@ -141,7 +143,10 @@ async function main(): Promise<void> {
     }
   }): Promise<ChildPortHandle> => {
     // Host-private bootstrap stays in-process only — never attach/trace/LLM.
+    // Inherited harness slice is identity for child record/metadata, not attach payload.
     void args.sessionBootstrap
+    void args.frozenHarness
+    void args.harnessState
     const childBase = new DefaultIOPort(gateway)
     const childPort = new RecordingIOPort(
       childBase,
@@ -185,6 +190,7 @@ async function main(): Promise<void> {
   }
   const executor = new LiveCellExecutor(runId, episodeId, runPins, objects, {
     recursiveModelEnabled: true,
+    frozenHarness: assembled.frozen,
     control,
     childPortFactory,
     ...(sessionAsyncEnabled

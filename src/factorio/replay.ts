@@ -40,6 +40,8 @@ import {
   type FreezeResult,
   type HarnessEvidenceSlice,
   type HarnessPinsV1,
+  normalizePinsV1,
+  normalizeEvidenceHarness,
 } from '../harness/index.js'
 
 import { renderCardDoc } from '../catalog/render.js'
@@ -180,35 +182,59 @@ function requireConsistentRecordedHarnessPins(input: {
       },
     )
   }
+  // Closed-schema validate external artifact slices before equality/store resolve.
+  const pinsHarnessState = normalizePinsV1(input.pinsHarnessState)
+  const evidence = normalizeEvidenceHarness(input.evidence)
   // Same-named pin fields must match exactly across evidence and pins.
   assertHarnessPinsEqual(
-    input.pinsHarnessState,
-    input.evidence,
+    pinsHarnessState,
+    evidence,
     'evidence-vs-pins.harnessState',
   )
-  if (input.pinsHarnessState.codeProtocolPin !== input.outerCodeProtocolPin) {
+  if (pinsHarnessState.codeProtocolPin !== input.outerCodeProtocolPin) {
     throw new HarnessError(
       'HARNESS_PROTOCOL_INCOMPATIBLE',
       'recorded harness codeProtocolPin does not match outer pins.harness',
       {
         outer: input.outerCodeProtocolPin,
-        recorded: input.pinsHarnessState.codeProtocolPin,
+        recorded: pinsHarnessState.codeProtocolPin,
       },
     )
   }
-  if (input.evidence.codeProtocolPin !== input.outerCodeProtocolPin) {
+  if (evidence.codeProtocolPin !== input.outerCodeProtocolPin) {
     throw new HarnessError(
       'HARNESS_PROTOCOL_INCOMPATIBLE',
       'evidence.harness codeProtocolPin does not match outer pins.harness',
       {
         outer: input.outerCodeProtocolPin,
-        evidence: input.evidence.codeProtocolPin,
+        evidence: evidence.codeProtocolPin,
       },
     )
   }
+  // New-format recorded-pins path only accepts evidence selectionSource=recorded.
+  // legacy-registry (+ registryIdentity) is legacy-path provenance and must not
+  // ride through pins.harnessState reconstruction (L2 §10.1).
+  if (evidence.selectionSource !== 'recorded') {
+    throw new HarnessError(
+      'HARNESS_REF_INVALID',
+      'new-format replay requires evidence.harness.selectionSource=recorded',
+      {
+        selectionSource: evidence.selectionSource,
+        hasRegistryIdentity: evidence.registryIdentity !== undefined,
+      },
+    )
+  }
+  if (evidence.registryIdentity !== undefined) {
+    throw new HarnessError(
+      'HARNESS_REF_INVALID',
+      'new-format replay forbids evidence.harness.registryIdentity',
+      { registryIdentity: evidence.registryIdentity },
+    )
+  }
+
   // Prefer pins.harnessState as the closed recorded selection (evidence may
   // carry selectionSource extras already checked for pin-field equality).
-  return input.pinsHarnessState
+  return pinsHarnessState
 }
 
 

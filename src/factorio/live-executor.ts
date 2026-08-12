@@ -32,6 +32,14 @@ import {
 import type { DeclaredLimits, PreparedRecursiveAdmission } from './recursive-model.js'
 import { SessionAsyncHost, type SessionAsyncHostOptions } from './session-async-host.js'
 import { CELL_EXECUTION_SCHEMA } from './session-async-constants.js'
+import {
+  childRecordedFromFrozen,
+  inheritFrozenHarnessSlice,
+  toHarnessPinsV1,
+  type FrozenHarnessSlice,
+  type HarnessPinsV1,
+} from '../harness/index.js'
+import { harnessError } from '../harness/errors.js'
 import type {
   AgentEffect,
   CellExecutionRecord,
@@ -87,6 +95,13 @@ export type ChildPortFactory = (args: {
   input: string
   agentId: string
   /**
+   * Inherited parent frozen harness slice for the child run.
+   * Host-private control-plane identity — not a public Kernel binding.
+   */
+  frozenHarness?: FrozenHarnessSlice
+  /** Child RunPins.harnessState recorded from the inherited slice. */
+  harnessState?: HarnessPinsV1
+  /**
    * Host-private child session binding. MUST NOT be copied into attach,
    * trace payloads, or invokeLLM request bodies.
    */
@@ -102,6 +117,12 @@ export interface LiveCellExecutorOptions {
   recursiveTokenPool?: number
   maxRecursiveCalls?: number
   childPortFactory?: ChildPortFactory
+  /**
+   * Parent frozen harness slice. Required for real recursive child bootstrap:
+   * child inherits and records this slice; drift is HARNESS_CHILD_SELECTION_DRIFT
+   * before any child model request/effect.
+   */
+  frozenHarness?: FrozenHarnessSlice
   /** Injected parent absolute control for child invokeLLM. */
   control?: IOInvocationControl
   /**
@@ -318,6 +339,7 @@ export class LiveCellExecutor {
   private readonly recursiveModelEnabled: boolean
   private control: IOInvocationControl | undefined
   private childPortFactory: ChildPortFactory | undefined
+  private frozenHarness: FrozenHarnessSlice | undefined
   private attachFault: LiveCellExecutorOptions['attachFault']
   private internalFaultAfterPrepare: boolean
   private internalFaultAfterInvoke: boolean
@@ -358,6 +380,7 @@ export class LiveCellExecutor {
     this.recursiveModelEnabled = options.recursiveModelEnabled !== false
     this.control = options.control
     this.childPortFactory = options.childPortFactory
+    this.frozenHarness = options.frozenHarness
     this.attachFault = options.attachFault
     this.internalFaultAfterPrepare = options.internalFaultAfterPrepare === true
     this.internalFaultAfterInvoke = options.internalFaultAfterInvoke === true
@@ -395,6 +418,15 @@ export class LiveCellExecutor {
   setChildPortFactory(factory: ChildPortFactory | undefined): void {
     this.childPortFactory = factory
     this.sessionAsync?.setChildPortFactory(factory)
+  }
+
+  /** Host control-plane seam: bind parent frozen harness for child inheritance. */
+  setFrozenHarness(frozen: FrozenHarnessSlice | undefined): void {
+    this.frozenHarness = frozen
+  }
+
+  getFrozenHarness(): FrozenHarnessSlice | undefined {
+    return this.frozenHarness
   }
 
   /** Test seam: clear per-cell host effect gate between cells. */
@@ -531,6 +563,15 @@ export class LiveCellExecutor {
         stage,
       )
     } catch (error) {
+      // Child harness identity drift is a Host control-plane fail-closed error:
+      // do not convert it into a RecursiveModelResult INTERNAL failure.
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        (error as { code?: unknown }).code === 'HARNESS_CHILD_SELECTION_DRIFT'
+      ) {
+        throw error
+      }
       return await this.buildInternalFailureFromPrepared(
         prepared,
         admissionInput,
@@ -643,6 +684,54 @@ export class LiveCellExecutor {
       return { result, modelEffect: toModelEffect(result) }
     }
 
+    // Child harness inheritance BEFORE atomic reserve/commit so drift fails
+    // closed with no budget/effect side effects and before any child LLM.
+    // Legacy unit paths without #10 freeze keep prior attach-only behavior.
+    let childFrozen: FrozenHarnessSlice | undefined
+    let childHarnessState: HarnessPinsV1 | undefined
+    if (this.frozenHarness !== undefined) {
+      const parentFrozen = this.frozenHarness
+      // Prefer child-recorded identity from parent pins.harnessState when present
+      // so a mismatched recorded selection is rejected before the child LLM.
+      const childRecorded =
+        this.pins.harnessState !== undefined
+          ? {
+              selection: {
+                baselineRef: this.pins.harnessState.baselineRef,
+                ...(this.pins.harnessState.overlayRef !== undefined
+                  ? { overlayRef: this.pins.harnessState.overlayRef }
+                  : {}),
+              },
+              harnessContentHash: this.pins.harnessState.harnessContentHash,
+              schemaVersion: this.pins.harnessState.schemaVersion,
+              catalogCards: this.pins.harnessState.catalogCards,
+              compatibilityDecision: this.pins.harnessState.compatibilityDecision,
+              codeProtocolPin: this.pins.harnessState.codeProtocolPin,
+            }
+          : childRecordedFromFrozen(parentFrozen)
+      childFrozen = inheritFrozenHarnessSlice({
+        parent: parentFrozen,
+        childRecorded,
+      })
+      childHarnessState = toHarnessPinsV1({
+        document: childFrozen.document,
+        selection: childFrozen.selection,
+        harnessContentHash: childFrozen.harnessContentHash,
+        schemaVersion: childFrozen.schemaVersion,
+        catalogCards: childFrozen.catalogCards,
+        compatibilityDecision: childFrozen.compatibilityDecision,
+        codeProtocolPin: childFrozen.codeProtocolPin,
+        availableCatalogRefs: childFrozen.availableCatalogRefs,
+      })
+    } else if (this.pins.harnessState !== undefined) {
+      // New-format pins without Host-bound freeze cannot spawn children.
+      throw harnessError(
+        'HARNESS_CHILD_SELECTION_DRIFT',
+        'recursive child requires parent frozen harness slice when pins.harnessState is present',
+        { parentRunId: this.runId },
+      )
+    }
+
     // Step 7: atomic commit — occupy + reserve + count + allocate id
     const reserve = declared.reserve
     this.budgetPool.remainingTokens = applyReserve(
@@ -751,6 +840,8 @@ export class LiveCellExecutor {
         goal: truncateGoal(prepared.instructions),
         input: prepared.requestDigest,
         agentId: RECURSIVE_CHILD_AGENT_ID,
+        ...(childFrozen !== undefined ? { frozenHarness: childFrozen } : {}),
+        ...(childHarnessState !== undefined ? { harnessState: childHarnessState } : {}),
       })
       observedStarted = handle.attached === true
       stage.handle = handle
@@ -876,6 +967,13 @@ export class LiveCellExecutor {
         recursiveOrdinal: ordinal,
         pinsDigest: digest(this.pins),
         requestDigest: prepared.requestDigest,
+        ...(childFrozen !== undefined
+          ? {
+              // Child identity record: inherited parent harness slice (L2 §4.4).
+              harnessContentHash: childFrozen.harnessContentHash,
+              harnessState: childHarnessState,
+            }
+          : {}),
       },
     }
 

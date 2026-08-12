@@ -93,7 +93,10 @@ export {
   replayFromRecordedPins,
   replayFromLegacyPin,
   inheritFrozenHarnessSlice,
+  childRecordedFromFrozen,
   toHarnessPinsV1,
+  normalizePinsV1,
+  normalizeEvidenceHarness,
   type HostRunBootstrap,
   type FreezeResult,
 } from './host.js'
