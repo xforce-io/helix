@@ -45,9 +45,9 @@ async function fixtureSmoke(rootDir: string): Promise<unknown> {
     baselineRef = rcs.publishBaseline(DOCUMENT, { id: 'fixture-baseline', revision: 0 })
   }
   const adapter: RefinementRunAdapter = {
-    async generate() {
+    async generate(input) {
       return {
-        generationRunRef: 'fixture-recorded-generation-run',
+        generationRunRef: input.reservedGenerationRunRef,
         payloadText: JSON.stringify({ schemaVersion: 'helix.harness-overlay/v1', baseBaselineRef: baselineRef, changes: { systemInstructionTemplate: 'improved fixture' } }),
         modelPins: { model: 'fixture-recorded-model' }, budget: { reserved: 64, charged: 8 },
       }
@@ -58,13 +58,15 @@ async function fixtureSmoke(rootDir: string): Promise<unknown> {
         quality: candidate ? 0.9 : 0.7, cost: 10, latencyMs: 10, failed: false, replayPassed: true,
         sharedPins: { model: 'fixture-recorded-model', seed: String(input.case.seed) },
         harnessPins: pins(baselineRef, candidate ? input.overlayRef : undefined),
-        runRef: `fixture-${input.arm}-${input.case.caseId}`,
+        runRef: input.reservedRunRef,
+        extractorDigest: 'e'.repeat(64),
       }
     },
   }
   const workflow = new RefinementWorkflow(rcs, adapter)
   const policy: RefinementPolicyV1 = {
     schemaVersion: 'helix.refinement-policy/v1', generation: { model: 'fixture-recorded-model', maxOutputTokens: 64 },
+    extractorDigest: 'e'.repeat(64),
     gate: { minQualityDelta: 0.1, maxCostRatio: 1, maxLatencyRatio: 1, maxFailureRateDelta: 0 },
     authority: { manualApprovers: ['fixture-researcher'] },
   }

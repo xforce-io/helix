@@ -6,7 +6,8 @@ import type { HarnessDocument } from '../../src/harness/index.js'
 import { RefinementControlStore } from '../../src/refinement/control-store.js'
 import { createMilkieRefinementAdapter } from '../../src/refinement/milkie-adapter.js'
 import { RefinementWorkflow, type RefinementPolicyV1, type EvaluationSuiteV1 } from '../../src/refinement/workflow.js'
-import { signedConfiguration } from './fixtures.js'
+import { signedConfiguration, FIXTURE_EXTRACTOR_DIGEST } from './fixtures.js'
+
 
 const document: HarnessDocument = {
   schemaVersion: 'helix.harness/v1',
@@ -23,6 +24,7 @@ const document: HarnessDocument = {
 const policy: RefinementPolicyV1 = {
   schemaVersion: 'helix.refinement-policy/v1',
   generation: { model: 'pinned-model', maxOutputTokens: 32 },
+  extractorDigest: FIXTURE_EXTRACTOR_DIGEST,
   gate: { minQualityDelta: 0.05, maxCostRatio: 1.2, maxLatencyRatio: 1.2, maxFailureRateDelta: 0 },
   authority: { manualApprovers: ['researcher'] },
 }
@@ -67,11 +69,14 @@ test('S1/S2 milkie adapter generates via IOPort and evaluates with ordinary #10 
     generationRunRef: 'milkie-generation-run',
     generationModel: 'pinned-model',
     sharedPins: { runner: 'milkie-fixture', model: 'pinned-model' },
-    extractMetrics: ({ arm, replayPassed }) => ({
+    projectGenerationInput: (sourceRunRefs) => ({ sourceRunRefs }),
+    extractorDigest: FIXTURE_EXTRACTOR_DIGEST,
+    runArm: ({ arm, reservedRunRef }) => ({
+      runRef: reservedRunRef,
       quality: arm === 'candidate' ? 0.95 : 0.8,
       cost: 5,
       latencyMs: 12,
-      failed: !replayPassed,
+      failed: false,
     }),
   })
 

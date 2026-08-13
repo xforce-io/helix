@@ -7,10 +7,13 @@
  * an existing durable Store/Registry — never publishes current source defaults.
  */
 
+import fs from 'node:fs'
+import path from 'node:path'
 import { renderCardDoc } from '../catalog/render.js'
 import { resolveCapabilitySet } from '../catalog/binding-set-map.js'
 import {
   bindControlPlaneText,
+  durableStoreSnapshotPath,
   freezeAvailableCatalogRefs,
   materializeHarnessRecord,
   renderControlPlane,
@@ -26,6 +29,7 @@ import {
   LegacySelectionRegistryStore,
   baselineContentHash,
 } from '../harness/index.js'
+import { RefinementControlStore } from '../refinement/control-store.js'
 import {
   FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT,
   FACTORIO_V4_HARNESS_DOCUMENT,
@@ -35,12 +39,12 @@ import {
 import type { RunPins } from './types.js'
 
 export type FactorioHostBundle = {
+  rcs: RefinementControlStore
   store: HarnessStateStore
   legacyRegistry: LegacySelectionRegistryStore
   defaultBaselineRef: HarnessStateRef
   legacyV4BaselineRef: HarnessStateRef
   legacyV5BaselineRef: HarnessStateRef
-  /** Durable root when Host holds immutable state across processes. */
   rootDir?: string
 }
 
@@ -85,10 +89,9 @@ export function createFactorioHostBundle(
     typeof options.rootDir === 'string' && options.rootDir.length > 0
       ? options.rootDir
       : undefined
-  const store = new HarnessStateStore(
-    rootDir !== undefined ? { rootDir } : {},
-  )
-  // Publish defaults only when missing so durable reopen is idempotent.
+  const rcs = new RefinementControlStore(rootDir === undefined ? {} : { rootDir })
+  if (rootDir !== undefined) importLegacyHarnessStoreIfPresent(rcs, rootDir)
+  const store = rcsHarnessView(rcs)
   const defaultBaselineRef = publishBaselineIfAbsent(store, {
     id: 'factorio.default-p1',
     revision: 1,
@@ -105,8 +108,8 @@ export function createFactorioHostBundle(
     document: FACTORIO_V5_HARNESS_DOCUMENT,
   })
   const legacyRegistry = new LegacySelectionRegistryStore(
-    store,
-    rootDir !== undefined ? { rootDir } : {},
+    rcs.materializeHarnessStore(),
+    rootDir === undefined ? {} : { rootDir },
   )
   legacyRegistry.registerLegacySelection({
     registryIdentity: {
@@ -129,23 +132,16 @@ export function createFactorioHostBundle(
     schemaVersion: 'helix.harness/v1',
   })
   return {
+    rcs,
     store,
     legacyRegistry,
     defaultBaselineRef,
     legacyV4BaselineRef,
     legacyV5BaselineRef,
-    ...(rootDir !== undefined ? { rootDir } : {}),
+    ...(rootDir === undefined ? {} : { rootDir }),
   }
 }
 
-/**
- * Replay open path: hydrate durable Store + LegacySelectionRegistry only.
- * Never publishes current source default baselines, never compares current
- * default payload hashes, and never re-registers legacy mappings.
- *
- * New-format replay then resolves solely from recorded refs/hash.
- * Legacy replay reads only already-persisted registry entries.
- */
 export function openFactorioReplayHost(
   options: OpenFactorioReplayHostOptions = {},
 ): FactorioReplayHostBundle {
@@ -158,17 +154,54 @@ export function openFactorioReplayHost(
     typeof options.rootDir === 'string' && options.rootDir.length > 0
       ? options.rootDir
       : undefined
-  const store = new HarnessStateStore(
-    rootDir !== undefined ? { rootDir } : {},
-  )
+  if (rootDir !== undefined && fs.existsSync(path.join(rootDir, 'refinement-control.json'))) {
+    const rcs = new RefinementControlStore({ rootDir })
+    const store = rcsHarnessView(rcs)
+    const legacyRegistry = new LegacySelectionRegistryStore(rcs.materializeHarnessStore(), { rootDir })
+    return { store, legacyRegistry, rootDir }
+  }
+  const store = new HarnessStateStore(rootDir === undefined ? {} : { rootDir })
   const legacyRegistry = new LegacySelectionRegistryStore(
     store,
-    rootDir !== undefined ? { rootDir } : {},
+    rootDir === undefined ? {} : { rootDir },
   )
   return {
     store,
     legacyRegistry,
-    ...(rootDir !== undefined ? { rootDir } : {}),
+    ...(rootDir === undefined ? {} : { rootDir }),
+  }
+}
+
+function rcsHarnessView(rcs: RefinementControlStore): HarnessStateStore {
+  return {
+    publishBaseline: (document: unknown, options?: { id?: string; revision?: number }) =>
+      rcs.publishBaseline(document, options),
+    publishOverlay: (overlay: unknown, options?: { id?: string; revision?: number }) =>
+      rcs.publishOverlay(overlay, options),
+    read: (ref: HarnessStateRef) => rcs.read(ref),
+    exportSnapshot: () => rcs.exportSnapshot(),
+    select: (input: unknown, catalog: readonly CatalogCardRef[]) =>
+      rcs.materializeHarnessStore().select(input, catalog),
+    resolve: (
+      selection: Parameters<HarnessStateStore['resolve']>[0],
+      codeProtocolPin: string,
+      catalog: readonly CatalogCardRef[],
+    ) => rcs.resolve(selection, codeProtocolPin, catalog),
+    get durableRootDir() {
+      return rcs.durableRootDir
+    },
+  } as HarnessStateStore
+}
+function importLegacyHarnessStoreIfPresent(rcs: RefinementControlStore, rootDir: string): void {
+  if (fs.existsSync(path.join(rootDir, 'refinement-control.json'))) return
+  if (!fs.existsSync(durableStoreSnapshotPath(rootDir))) return
+  const legacy = new HarnessStateStore({ rootDir })
+  const snapshot = legacy.exportSnapshot()
+  for (const entry of snapshot.baselines) {
+    rcs.publishBaseline(entry.document, { id: entry.ref.id, revision: entry.ref.revision })
+  }
+  for (const entry of snapshot.overlays) {
+    rcs.publishOverlay(entry.overlay, { id: entry.ref.id, revision: entry.ref.revision })
   }
 }
 
@@ -241,6 +274,12 @@ export function assembleFactorioRun(input: {
 }): AssembledFactorioRun {
   const codeProtocolPin = input.basePins.harness
   const availableCatalogRefs = formFactorioAvailableCatalogRefs(codeProtocolPin)
+  if (input.overlayRef !== undefined) {
+    input.bundle.rcs.select('external', {
+      baselineRef: input.baselineRef,
+      overlayRef: input.overlayRef,
+    }, availableCatalogRefs)
+  }
   const freeze = selectValidateResolveFreeze({
     store: input.bundle.store,
     availableCatalogRefs,

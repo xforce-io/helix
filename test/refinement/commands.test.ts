@@ -17,7 +17,7 @@ import type {
   RefinementRunAdapter,
 } from '../../src/refinement/workflow.js'
 import { RefinementWorkflow } from '../../src/refinement/workflow.js'
-import { HRCA_BUNDLE, signedConfiguration } from './fixtures.js'
+import { FIXTURE_EXTRACTOR_DIGEST, HRCA_BUNDLE, signedConfiguration } from './fixtures.js'
 
 const document: HarnessDocument = {
   schemaVersion: 'helix.harness/v1',
@@ -33,6 +33,7 @@ const document: HarnessDocument = {
 const policy: RefinementPolicyV1 = {
   schemaVersion: 'helix.refinement-policy/v1',
   generation: { model: 'm', maxOutputTokens: 2 },
+  extractorDigest: FIXTURE_EXTRACTOR_DIGEST,
   gate: { minQualityDelta: 0, maxCostRatio: 1, maxLatencyRatio: 1, maxFailureRateDelta: 0 },
   authority: { manualApprovers: ['human'] },
 }
@@ -95,11 +96,11 @@ test('formal command dispatcher claims assertion with ACK before generation and 
   })
   let generateCalls = 0
   const adapter: RefinementRunAdapter = {
-    async generate() {
+    async generate(input) {
       generateCalls += 1
       await new Promise(resolve => setTimeout(resolve, 15))
       return {
-        generationRunRef: 'recorded',
+        generationRunRef: input.reservedGenerationRunRef,
         payloadText: JSON.stringify({
           schemaVersion: 'helix.harness-overlay/v1',
           baseBaselineRef: base,
@@ -118,7 +119,8 @@ test('formal command dispatcher claims assertion with ACK before generation and 
         replayPassed: true,
         sharedPins: { seed: '0' },
         harnessPins: pin(input.arm === 'candidate' ? input.overlayRef : undefined),
-        runRef: input.arm,
+        runRef: input.reservedRunRef,
+        extractorDigest: FIXTURE_EXTRACTOR_DIGEST,
       }
     },
   }
@@ -198,9 +200,9 @@ test('proposeAndWait helper returns candidate only after terminal generation job
   const rcs = new RefinementControlStore()
   const base = rcs.publishBaseline(document, { id: 'wait', revision: 0 })
   const adapter: RefinementRunAdapter = {
-    async generate() {
+    async generate(input) {
       return {
-        generationRunRef: 'run',
+        generationRunRef: input.reservedGenerationRunRef,
         payloadText: JSON.stringify({
           schemaVersion: 'helix.harness-overlay/v1',
           baseBaselineRef: base,

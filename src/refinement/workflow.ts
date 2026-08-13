@@ -10,7 +10,7 @@
 import { createHash, createHmac } from 'node:crypto'
 
 import type { IIOPort, ModelResponse } from 'milkie'
-import { refsEqual, type HarnessPinsV1, type HarnessStateRef } from '../harness/index.js'
+import { isContentHash, refsEqual, type HarnessPinsV1, type HarnessStateRef } from '../harness/index.js'
 import { RefinementControlStore } from './control-store.js'
 import { refinementError } from './errors.js'
 import { verifyAutoGrant, verifyPolicyPublisher, type RefinementTrustBundleV1 } from './trust.js'
@@ -25,6 +25,8 @@ export type RefinementArtifactRef = {
 export type RefinementPolicyV1 = {
   schemaVersion: 'helix.refinement-policy/v1'
   generation: { model: string; maxOutputTokens: number }
+  /** Immutable Host extractor identity; changing the yardstick requires a new policy. */
+  extractorDigest: string
   gate: {
     minQualityDelta: number
     maxCostRatio: number
@@ -55,6 +57,7 @@ export type EvaluationMetric = {
   sharedPins: Record<string, string>
   harnessPins: HarnessPinsV1
   runRef: string
+  extractorDigest: string
 }
 
 export interface RefinementRunAdapter {
@@ -62,6 +65,7 @@ export interface RefinementRunAdapter {
     sourceRunRefs: string[]
     baselineRef: HarnessStateRef
     policy: RefinementPolicyV1
+    reservedGenerationRunRef: string
   }): Promise<RecordedGeneration>
   evaluate(input: {
     arm: 'baseline' | 'candidate'
@@ -69,6 +73,7 @@ export interface RefinementRunAdapter {
     baselineRef: HarnessStateRef
     overlayRef?: HarnessStateRef
     policy: RefinementPolicyV1
+    reservedRunRef: string
   }): Promise<EvaluationMetric>
 }
 
@@ -205,13 +210,19 @@ export class RefinementWorkflow {
       state: string
     }>(jobRef, 'generation-job')
     const policy = this.read<RefinementPolicyV1>(job.policyRef, 'policy')
-    const generated = await this.adapter.generate({
+    const reservedGenerationRunRef = this.reserveGenerationRun(jobRef)
+    const priorPayload = this.findById<RecordedGeneration>('generation-job-payload', jobRef.id)
+    const generated = priorPayload?.payload ?? await this.adapter.generate({
       sourceRunRefs: job.sourceRunRefs,
       baselineRef: job.baselineRef,
       policy,
+      reservedGenerationRunRef,
     })
-    if (!nonEmpty(generated.generationRunRef) || !nonEmpty(generated.payloadText)) {
-      throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'generation adapter did not return a recorded run and one payload')
+    if (priorPayload === undefined) {
+      this.put('generation-job-payload', jobRef.id, generated)
+    }
+    if (!nonEmpty(generated.generationRunRef) || generated.generationRunRef !== reservedGenerationRunRef || !nonEmpty(generated.payloadText)) {
+      throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'generation adapter did not return the reserved recorded run and one payload')
     }
     // Another worker may have finished while we generated; re-check before admit.
     const raced = this.showGenerationJob(jobRef)
@@ -304,10 +315,17 @@ export class RefinementWorkflow {
     const suite = this.read<EvaluationSuiteV1>(job.suiteRef, 'suite')
     const cases: EvaluationReport['cases'] = []
     for (const item of suite.cases) {
-      const baseline = await this.adapter.evaluate({ arm: 'baseline', case: item, baselineRef: candidate.baseBaselineRef, policy })
+      const baselineReserved = this.reserveEvaluationRun(jobRef, 'baseline', item.caseId)
+      const candidateReserved = this.reserveEvaluationRun(jobRef, 'candidate', item.caseId)
+      const baseline = await this.adapter.evaluate({
+        arm: 'baseline', case: item, baselineRef: candidate.baseBaselineRef, policy, reservedRunRef: baselineReserved,
+      })
       const candidateArm = await this.adapter.evaluate({
         arm: 'candidate', case: item, baselineRef: candidate.baseBaselineRef, overlayRef: candidate.overlayRef, policy,
+        reservedRunRef: candidateReserved,
       })
+      assertRecordedEvaluationMetric(baseline, policy, baselineReserved)
+      assertRecordedEvaluationMetric(candidateArm, policy, candidateReserved)
       assertEvaluationArmPins({
         baseline, candidate: candidateArm, baselineRef: candidate.baseBaselineRef, overlayRef: candidate.overlayRef,
       })
@@ -325,7 +343,6 @@ export class RefinementWorkflow {
       ratioOk(candidateAggregate.latencyMs, baseline.latencyMs, policy.gate.maxLatencyRatio) &&
       candidateAggregate.failureRate - baseline.failureRate <= policy.gate.maxFailureRateDelta
 
-    // Race-safe: another worker may have published the report already.
     const raced = this.showEvaluationJob(jobRef)
     if (raced.reportRef !== undefined) return this.readReport(raced.reportRef)
 
@@ -465,6 +482,27 @@ export class RefinementWorkflow {
     return { overlayRef, decisionRef: decision.ref }
   }
 
+  private reserveGenerationRun(jobRef: RefinementArtifactRef): string {
+    const existing = this.findById<{ generationRunRef: string }>('generation-run-reservation', jobRef.id)
+    if (existing !== undefined) return existing.payload.generationRunRef
+    const generationRunRef = `recorded-generation:${jobRef.id}`
+    this.put('generation-run-reservation', jobRef.id, { generationRunRef })
+    return generationRunRef
+  }
+
+  private reserveEvaluationRun(
+    jobRef: RefinementArtifactRef,
+    arm: 'baseline' | 'candidate',
+    caseId: string,
+  ): string {
+    const id = `${jobRef.id}:${arm}:${caseId}`
+    const existing = this.findById<{ runRef: string }>('evaluation-run-reservation', id)
+    if (existing !== undefined) return existing.payload.runRef
+    const runRef = `recorded-evaluation:${id}`
+    this.put('evaluation-run-reservation', id, { runRef })
+    return runRef
+  }
+
   private put<T>(kind: string, id: string, payload: T): Artifact<T> {
     const value = artifact(kind, id, payload)
     this.rcs.putArtifact(refKey(value.ref), value.payload)
@@ -495,19 +533,28 @@ export function createIOPortGenerationAdapter(input: {
   port: IIOPort
   model: string
   generationRunRef: string
+  projectGenerationInput?: (sourceRunRefs: string[]) => unknown
   evaluate: RefinementRunAdapter['evaluate']
 }): Pick<RefinementRunAdapter, 'generate'> & Pick<RefinementRunAdapter, 'evaluate'> {
   return {
     async generate(args) {
+      const projection = input.projectGenerationInput === undefined
+        ? { sourceRunRefs: args.sourceRunRefs, baselineRef: args.baselineRef, policy: args.policy }
+        : {
+            sourceRunRefs: args.sourceRunRefs,
+            baselineRef: args.baselineRef,
+            policy: args.policy,
+            projection: input.projectGenerationInput(args.sourceRunRefs),
+          }
       const response: ModelResponse = await input.port.invokeLLM({
         model: input.model,
-        messages: [{ role: 'user', content: [{ type: 'text', text: JSON.stringify(args) }] }],
+        messages: [{ role: 'user', content: [{ type: 'text', text: JSON.stringify(projection) }] }],
         maxTokens: args.policy.generation.maxOutputTokens,
       })
       const texts = response.content.filter(c => c.type === 'text').map(c => c.text)
       if (texts.length !== 1) throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'generation run must output exactly one text envelope')
       return {
-        generationRunRef: input.generationRunRef,
+        generationRunRef: args.reservedGenerationRunRef,
         payloadText: texts[0]!, modelPins: { model: input.model },
         budget: { reserved: args.policy.generation.maxOutputTokens, charged: response.usage?.outputTokens ?? 0 },
       }
@@ -542,8 +589,22 @@ function stable(value: unknown): string {
   return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`
 }
 function validatePolicy(policy: RefinementPolicyV1): void {
-  if (policy.schemaVersion !== 'helix.refinement-policy/v1' || !nonEmpty(policy.generation.model) || !Number.isSafeInteger(policy.generation.maxOutputTokens) || policy.generation.maxOutputTokens <= 0 || policy.authority.manualApprovers.length === 0) throw refinementError('REFINEMENT_CONFIGURATION_UNTRUSTED', 'policy schema is invalid')
+  if (policy.schemaVersion !== 'helix.refinement-policy/v1' || !nonEmpty(policy.generation.model) || !Number.isSafeInteger(policy.generation.maxOutputTokens) || policy.generation.maxOutputTokens <= 0 || policy.authority.manualApprovers.length === 0 || !isContentHash(policy.extractorDigest)) throw refinementError('REFINEMENT_CONFIGURATION_UNTRUSTED', 'policy schema is invalid')
   for (const value of Object.values(policy.gate)) if (!Number.isFinite(value) || value < 0) throw refinementError('REFINEMENT_CONFIGURATION_UNTRUSTED', 'policy gate is invalid')
+}
+function assertRecordedEvaluationMetric(
+  metric: EvaluationMetric,
+  policy: RefinementPolicyV1,
+  reservedRunRef: string,
+): void {
+  if (
+    !nonEmpty(metric.runRef) ||
+    metric.runRef !== reservedRunRef ||
+    metric.runRef.startsWith('eval-') ||
+    metric.extractorDigest !== policy.extractorDigest
+  ) {
+    throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'evaluation metric is not bound to the reserved recorded run and policy extractor')
+  }
 }
 function validateSuite(suite: EvaluationSuiteV1): void {
   if (suite.schemaVersion !== 'helix.refinement-suite/v1' || suite.cases.length === 0 || new Set(suite.cases.map(c => c.caseId)).size !== suite.cases.length) throw refinementError('REFINEMENT_CONFIGURATION_UNTRUSTED', 'suite schema is invalid')

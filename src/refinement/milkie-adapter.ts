@@ -4,8 +4,8 @@
  * Generation always goes through RecordingIOPort (or any IIOPort the Host
  * supplies). Evaluation freezes ordinary #10 pins via select→resolve→freeze
  * on the evaluator route, then verifies recorded-pin replay with zero live
- * selection drift. Metrics remain Host-supplied so scenario quality extractors
- * stay outside RCS.
+ * selection drift. Host `runArm` supplies the recorded milkie run and outcome
+ * metrics; core never invents `eval-arm-…` run refs.
  */
 
 import type { IIOPort } from 'milkie'
@@ -32,33 +32,31 @@ import {
   type RefinementRunAdapter,
 } from './workflow.js'
 
-export type MetricExtractor = (input: {
-  arm: 'baseline' | 'candidate'
-  case: EvaluationSuiteV1['cases'][number]
-  pins: HarnessPinsV1
-  frozenHash: string
-  replayPassed: boolean
-}) => Omit<EvaluationMetric, 'harnessPins' | 'runRef' | 'replayPassed' | 'sharedPins'>
+export type EvaluationArmResult = {
+  runRef: string
+  quality: number
+  cost: number
+  latencyMs: number
+  failed: boolean
+}
 
 export type CreateMilkieRefinementAdapterInput = {
-  /** RCS used as the #10 store for evaluator selection/visibility. */
   rcs: RefinementControlStore
-  /** Frozen available catalog membership for this Host deployment. */
   availableCatalogRefs: readonly CatalogCardRef[]
   codeProtocolPin: string
-  /**
-   * Live generation port. Prefer a Host-wrapped RecordingIOPort so Trace/budget
-   * authority stays in milkie. When omitted, a memory RecordingIOPort is built
-   * around `innerPort`.
-   */
   generationPort?: IIOPort
-  /** Required when generationPort is omitted. */
   innerPort?: IIOPort
   generationRunRef: string
   generationModel: string
-  /** Deterministic quality/cost extractor; no LLM. */
-  extractMetrics: MetricExtractor
-  /** Shared execution pins identical on both arms (runner/model/seed…). */
+  projectGenerationInput: (sourceRunRefs: string[]) => unknown
+  runArm: (input: {
+    arm: 'baseline' | 'candidate'
+    case: EvaluationSuiteV1['cases'][number]
+    reservedRunRef: string
+    pins: HarnessPinsV1
+    replayPassed: boolean
+  }) => EvaluationArmResult | Promise<EvaluationArmResult>
+  extractorDigest: string
   sharedPins: Record<string, string>
 }
 
@@ -92,6 +90,7 @@ export function createMilkieRefinementAdapter(
     port,
     model: input.generationModel,
     generationRunRef: input.generationRunRef,
+    projectGenerationInput: input.projectGenerationInput,
     evaluate: async () => {
       throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'generation-only adapter')
     },
@@ -114,14 +113,16 @@ export function createMilkieRefinementAdapter(
           caseId: args.case.caseId,
           inputRef: args.case.inputRef,
         },
-        extractMetrics: input.extractMetrics,
+        runArm: input.runArm,
+        extractorDigest: input.extractorDigest,
+        reservedRunRef: args.reservedRunRef,
         policy: args.policy,
       })
     },
   }
 }
 
-function evaluateArmWithHarness(input: {
+async function evaluateArmWithHarness(input: {
   rcs: RefinementControlStore
   arm: 'baseline' | 'candidate'
   case: EvaluationSuiteV1['cases'][number]
@@ -130,12 +131,14 @@ function evaluateArmWithHarness(input: {
   availableCatalogRefs: readonly CatalogCardRef[]
   codeProtocolPin: string
   sharedPins: Record<string, string>
-  extractMetrics: MetricExtractor
+  runArm: CreateMilkieRefinementAdapterInput['runArm']
+  extractorDigest: string
+  reservedRunRef: string
   policy: RefinementPolicyV1
-}): EvaluationMetric {
-  void input.policy
-  // Build an ephemeral #10 store view from RCS by re-reading published refs.
-  // Selection still goes through RCS visibility gates first.
+}): Promise<EvaluationMetric> {
+  if (input.extractorDigest !== input.policy.extractorDigest) {
+    throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'Host extractorDigest does not match policy')
+  }
   const selection = input.rcs.select(
     input.arm === 'candidate' ? 'evaluator' : 'external',
     {
@@ -145,9 +148,6 @@ function evaluateArmWithHarness(input: {
     input.availableCatalogRefs,
   )
 
-  // Reconstruct a HarnessStateStore-compatible bootstrap for freeze/replay by
-  // publishing only the selected baseline/overlay into a process-local store.
-  // The durable authority remains RCS; this is the Host evaluation view.
   const local = new HarnessStateStore({ skipRegistryLookup: true })
   const baselineStored = input.rcs.read(input.baselineRef)
   if (baselineStored.kind !== 'baseline') {
@@ -200,19 +200,23 @@ function evaluateArmWithHarness(input: {
     replayPassed = false
   }
 
-  const metrics = input.extractMetrics({
+  const metrics = await input.runArm({
     arm: input.arm,
     case: input.case,
+    reservedRunRef: input.reservedRunRef,
     pins: harnessPins,
-    frozenHash: harnessPins.harnessContentHash,
     replayPassed,
   })
 
   return {
-    ...metrics,
+    quality: metrics.quality,
+    cost: metrics.cost,
+    latencyMs: metrics.latencyMs,
+    failed: metrics.failed,
     replayPassed,
     sharedPins: input.sharedPins,
     harnessPins,
-    runRef: `eval-${input.arm}-${input.case.caseId}-${harnessPins.harnessContentHash.slice(0, 12)}`,
+    runRef: metrics.runRef,
+    extractorDigest: input.extractorDigest,
   }
 }
