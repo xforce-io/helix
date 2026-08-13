@@ -4,6 +4,9 @@
   "private": true,
   "description": "Model-owned RLM runtime and verifiable harness evolution on milkie.",
   "type": "module",
+  "bin": {
+    "helix": "dist/refinement/cli.js"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -15,7 +18,7 @@
     "build": "tsc -p tsconfig.json && mkdir -p dist/catalog/cards && cp src/catalog/cards/*.json dist/catalog/cards/",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run check && npm run test:unit",
-    "test:unit": "tsx --test test/*.test.ts test/catalog/*.test.ts test/harness/*.test.ts && uv run --project examples/factorio python -m unittest discover -s examples/factorio/tests -p 'test_*.py'",
+    "test:unit": "tsx --test test/*.test.ts test/catalog/*.test.ts test/harness/*.test.ts test/refinement/*.test.ts && uv run --project examples/factorio python -m unittest discover -s examples/factorio/tests -p 'test_*.py'",
     "factorio:cluster:start": "uv run --project examples/factorio python examples/factorio/cluster.py start",
     "factorio:cluster:stop": "uv run --project examples/factorio python examples/factorio/cluster.py stop",
     "verify:factorio:live-smoke": "uv run --project examples/factorio python examples/factorio/verify_live.py",
