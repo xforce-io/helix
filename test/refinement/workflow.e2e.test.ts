@@ -16,7 +16,7 @@ import {
   type EvaluationSuiteV1,
   type RefinementArtifactRef,
 } from '../../src/refinement/workflow.js'
-import { signedConfiguration } from './fixtures.js'
+import { FIXTURE_EXTRACTOR_DIGEST, signedConfiguration } from './fixtures.js'
 
 const document: HarnessDocument = {
   schemaVersion: 'helix.harness/v1',
@@ -27,6 +27,7 @@ const document: HarnessDocument = {
 const policy: RefinementPolicyV1 = {
   schemaVersion: 'helix.refinement-policy/v1',
   generation: { model: 'fixture-model', maxOutputTokens: 100 },
+  extractorDigest: FIXTURE_EXTRACTOR_DIGEST,
   gate: { minQualityDelta: 0.1, maxCostRatio: 1.1, maxLatencyRatio: 1.1, maxFailureRateDelta: 0 },
   authority: { manualApprovers: ['researcher'] },
 }
@@ -46,9 +47,9 @@ function pins(base: ReturnType<RefinementControlStore['publishBaseline']>, overl
 
 function adapter(base: ReturnType<RefinementControlStore['publishBaseline']>): RefinementRunAdapter {
   return {
-    async generate() {
+    async generate(input) {
       return {
-        generationRunRef: 'recorded-generation-run',
+        generationRunRef: input.reservedGenerationRunRef,
         payloadText: JSON.stringify({ schemaVersion: 'helix.harness-overlay/v1', baseBaselineRef: base, changes: { systemInstructionTemplate: 'candidate' } }),
         modelPins: { model: 'fixture-model', provider: 'recorded-ioport' },
         budget: { reserved: 100, charged: 12 },
@@ -59,7 +60,9 @@ function adapter(base: ReturnType<RefinementControlStore['publishBaseline']>): R
       return {
         quality: candidate ? 0.9 : 0.7, cost: candidate ? 10 : 10, latencyMs: candidate ? 100 : 100,
         failed: false, replayPassed: true, sharedPins: { model: 'fixture-model', seed: String(input.case.seed), runner: 'fixture' },
-        harnessPins: pins(base, candidate ? input.overlayRef : undefined), runRef: `${input.arm}-${input.case.caseId}-run`,
+        harnessPins: pins(base, candidate ? input.overlayRef : undefined),
+        runRef: input.reservedRunRef,
+        extractorDigest: FIXTURE_EXTRACTOR_DIGEST,
       }
     },
   }
@@ -140,11 +143,11 @@ test('S1 propose ACK is immutable before generation completes and retries share 
   const rcs = new RefinementControlStore()
   const base = rcs.publishBaseline(document, { id: 'ack-base', revision: 0 })
   const slow = adapter(base)
-  slow.generate = async () => {
+  slow.generate = async input => {
     generateCalls += 1
     await new Promise(resolve => setTimeout(resolve, 20))
     return {
-      generationRunRef: 'recorded-generation-run',
+      generationRunRef: input.reservedGenerationRunRef,
       payloadText: JSON.stringify({
         schemaVersion: 'helix.harness-overlay/v1',
         baseBaselineRef: base,
@@ -199,7 +202,9 @@ test('S2 evaluation rejects forged ordinary #10 arm pins before report publicati
   const bad = adapter(base)
   bad.evaluate = async input => ({
     quality: 1, cost: 1, latencyMs: 1, failed: false, replayPassed: true, sharedPins: { same: 'yes' },
-    harnessPins: pins(base, input.arm === 'candidate' ? undefined : undefined), runRef: input.arm,
+    harnessPins: pins(base, input.arm === 'candidate' ? undefined : undefined),
+    runRef: input.reservedRunRef,
+    extractorDigest: FIXTURE_EXTRACTOR_DIGEST,
   })
   const workflow = new RefinementWorkflow(rcs, bad)
   const policyRef = workflow.publishPolicy(signedConfiguration('pin-policy', 'policy', policy))

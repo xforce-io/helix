@@ -3,8 +3,9 @@
 Status: Factorio acceptance vertical delivered through Issues #1, #3, #5, #7,
 and #11; sequence item 3 (versioned harness state) is implemented by Issue #10
 (generic HarnessDocument / Store / run-boundary freeze; Factorio is a scenario
-adapter consumer). Issue #13 adds the internal, controlled refinement workflow
-for sequence items 4–5; general public runtime contracts remain future work.
+adapter consumer). Issue #13 adds the internal refinement control plane; Issues
+#18 / #17 / #16 wire recorded-run binding, Factorio RCS live `--overlay`, and
+FLE outcome projection/extraction. General public runtime contracts remain future work.
 
 Approved designs:
 [Issue #1 L2](./design/1-rlm-factorio-harness.md) ·
@@ -110,6 +111,6 @@ Harness changes have two scopes:
 2. ~~Persistent sessions, asynchronous sub-agent handles, and mailboxes.~~
    **Done** in the Factorio example
    ([#7](https://github.com/xforce-io/helix/issues/7)).
-3. Versioned harness state and session-local overlays.
-4. Trace-driven refiner producing structured harness candidates.
-5. Fork or fresh-suite evaluation and deterministic promotion or rollback.
+3. ~~Versioned harness state and session-local overlays.~~ **Done** ([#10](https://github.com/xforce-io/helix/issues/10)).
+4. ~~Trace-driven refiner producing structured harness candidates.~~ **Done** ([#13](https://github.com/xforce-io/helix/issues/13), [#18](https://github.com/xforce-io/helix/issues/18), Factorio projection in [#16](https://github.com/xforce-io/helix/issues/16)).
+5. ~~Fork or fresh-suite evaluation and deterministic promotion or rollback.~~ **Done** ([#13](https://github.com/xforce-io/helix/issues/13) gates, [#17](https://github.com/xforce-io/helix/issues/17) Factorio RCS/`--overlay`, [#16](https://github.com/xforce-io/helix/issues/16) FLE extractor).

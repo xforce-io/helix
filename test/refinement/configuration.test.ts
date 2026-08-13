@@ -5,9 +5,11 @@ import { RefinementControlStore } from '../../src/refinement/control-store.js'
 import { RefinementError } from '../../src/refinement/errors.js'
 import { signConfiguration, type RefinementTrustBundleV1 } from '../../src/refinement/trust.js'
 import { RefinementWorkflow, type RefinementPolicyV1 } from '../../src/refinement/workflow.js'
+import { FIXTURE_EXTRACTOR_DIGEST } from './fixtures.js'
 
 const policy: RefinementPolicyV1 = {
   schemaVersion: 'helix.refinement-policy/v1', generation: { model: 'm', maxOutputTokens: 1 },
+  extractorDigest: FIXTURE_EXTRACTOR_DIGEST,
   gate: { minQualityDelta: 0, maxCostRatio: 1, maxLatencyRatio: 1, maxFailureRateDelta: 0 }, authority: { manualApprovers: ['human'] },
 }
 const bundle: RefinementTrustBundleV1 = {

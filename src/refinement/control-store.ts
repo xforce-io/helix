@@ -15,6 +15,7 @@ import {
   type HarnessSelection,
   type HarnessSelectionInput,
   type HarnessStateRef,
+  type ResolvedHarness,
   type StoredHarnessState,
   withDurableLockSync,
 } from '../harness/index.js'
@@ -90,9 +91,37 @@ export class RefinementControlStore {
     return this.transaction(() => this.harness.publishBaseline(input, options))
   }
 
+  publishOverlay(input: unknown, options?: { id?: string; revision?: number }): HarnessStateRef {
+    return this.transaction(() => this.harness.publishOverlay(input, options))
+  }
+
   read(ref: HarnessStateRef): StoredHarnessState {
     this.reload()
     return this.harness.read(ref)
+  }
+
+  exportSnapshot(): DurableHarnessStoreSnapshot {
+    this.reload()
+    return this.harness.exportSnapshot()
+  }
+
+  get durableRootDir(): string | undefined {
+    return this.rootDir
+  }
+
+  /** Process-local #10 view of the current RCS harness snapshot. */
+  materializeHarnessStore(): HarnessStateStore {
+    this.reload()
+    return this.hydrate(this.snapshot)
+  }
+
+  resolve(
+    selection: HarnessSelection,
+    codeProtocolPin: string,
+    availableCatalogRefs: readonly CatalogCardRef[],
+  ): ResolvedHarness {
+    this.reload()
+    return this.harness.resolve(selection, codeProtocolPin, availableCatalogRefs)
   }
 
   /**

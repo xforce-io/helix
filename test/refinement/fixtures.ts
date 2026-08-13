@@ -1,5 +1,7 @@
 import { signConfiguration, type RefinementTrustBundleV1 } from '../../src/refinement/trust.js'
 
+export const FIXTURE_EXTRACTOR_DIGEST = 'e'.repeat(64)
+
 export const HRCA_BUNDLE: RefinementTrustBundleV1 = {
   schemaVersion: 'helix.refinement-trust-bundle/v1',
   generation: 'fixture-generation',

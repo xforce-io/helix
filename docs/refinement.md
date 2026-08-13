@@ -20,6 +20,8 @@ Issue #13 的 refinement control plane 是 Host 内部能力。它不向 Kernel 
 - `adapter`：milkie-recorded `RefinementRunAdapter`（推荐 `createMilkieRefinementAdapter`）
 - 可选 `now`：可信时钟
 
+Factorio example Host：`src/factorio/refinement-host.ts`（`createRefinementCommandHost`）。P3 路径见 `examples/factorio/README.md`。
+
 ```bash
 # 副作用命令（需 --host-module + --assertion）
 helix refine propose --host-module ./host.mjs --assertion assertion.json \

@@ -34,6 +34,7 @@ import {
   assembleFactorioRun,
   createFactorioHostBundle,
 } from './harness-host.js'
+import { parseHarnessStateRef } from './refinement-host.js'
 
 import { runHarness } from './harness.js'
 import { LiveCellExecutor, type ChildPortHandle } from './live-executor.js'
@@ -93,12 +94,14 @@ async function main(): Promise<void> {
     process.env['HELIX_SESSION_ASYNC'] === 'yes'
   const basePins = sessionAsyncEnabled ? pinsSessionAsync(model) : pins(model)
   const hostBundle = createFactorioHostBundle({ rootDir: HARNESS_STATE_ROOT })
+  const overlayArg = argument('--overlay')
   const assembled = assembleFactorioRun({
     bundle: hostBundle,
     basePins,
     baselineRef: sessionAsyncEnabled
       ? hostBundle.legacyV5BaselineRef
       : hostBundle.defaultBaselineRef,
+    ...(overlayArg === undefined ? {} : { overlayRef: parseHarnessStateRef(overlayArg) }),
   })
   const runPins = assembled.pins
 
