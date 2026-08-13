@@ -3,8 +3,8 @@
 Status: Factorio acceptance vertical delivered through Issues #1, #3, #5, #7,
 and #11; sequence item 3 (versioned harness state) is implemented by Issue #10
 (generic HarnessDocument / Store / run-boundary freeze; Factorio is a scenario
-adapter consumer). General public runtime contracts and sequence items 4–5
-remain future work.
+adapter consumer). Issue #13 adds the internal, controlled refinement workflow
+for sequence items 4–5; general public runtime contracts remain future work.
 
 Approved designs:
 [Issue #1 L2](./design/1-rlm-factorio-harness.md) ·
@@ -12,7 +12,8 @@ Approved designs:
 [Issue #5 L2](./design/5-kernel-recursive-model-call.md) ·
 [Issue #7 L2](./design/7-session-subagent-mailbox.md) ·
 [Issue #10 L2](./design/10-versioned-harness-state.md) ·
-[Issue #11 L2](./design/11-runtime-capability-catalog.md).
+[Issue #11 L2](./design/11-runtime-capability-catalog.md) ·
+[Issue #13 L2](./design/13-harness-refinement-toolchain.md).
 
 ## Examples policy
 
