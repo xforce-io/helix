@@ -62,7 +62,10 @@ architecture. The approved L1 is expanded by the
 [implemented Factorio L2 design](./docs/design/1-rlm-factorio-harness.md).
 The v3 runtime/finalization contract is specified by
 [Issue #3](https://github.com/xforce-io/helix/issues/3) and its
-[L2 design](./docs/design/3-factorio-milkie-runtime-contracts.md).
+[L2 design](./docs/design/3-factorio-milkie-runtime-contracts.md). The controlled
+cross-run refinement workflow is specified by
+[Issue #13](https://github.com/xforce-io/helix/issues/13); its fixture smoke and
+runtime boundaries are documented in [docs/refinement.md](./docs/refinement.md).
 
 ## Development
 
