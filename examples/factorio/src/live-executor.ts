@@ -38,8 +38,8 @@ import {
   toHarnessPinsV1,
   type FrozenHarnessSlice,
   type HarnessPinsV1,
-} from '../harness/index.js'
-import { harnessError } from '../harness/errors.js'
+} from '../../../src/harness/index.js'
+import { harnessError } from '../../../src/harness/errors.js'
 import type {
   AgentEffect,
   CellExecutionRecord,

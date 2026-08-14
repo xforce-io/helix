@@ -57,7 +57,7 @@ import type {
   SessionAsyncCapability,
   SessionEffect,
 } from './types.js'
-import type { FrozenHarnessSlice, HarnessPinsV1 } from '../harness/index.js'
+import type { FrozenHarnessSlice, HarnessPinsV1 } from '../../../src/harness/index.js'
 /** Same shape as live-executor ChildPortFactory (avoid circular import). */
 export type SessionChildPortFactory = (args: {
   childRunId: string

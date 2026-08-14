@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Event } from 'milkie/dist/trace/types.js'
-import { preflightLive, type CommandRunner } from '../src/factorio/cli-common.js'
-import { JsonLineProcess } from '../src/factorio/line-process.js'
-import { LiveCellExecutor } from '../src/factorio/live-executor.js'
-import { boundedObservation } from '../src/factorio/live-executor.js'
+import { preflightLive, type CommandRunner } from '../src/cli-common.js'
+import { JsonLineProcess } from '../src/line-process.js'
+import { LiveCellExecutor } from '../src/live-executor.js'
+import { boundedObservation } from '../src/live-executor.js'
 import {
   decideFinalOutcome,
   episodeContinuityCheck,
   traceChecksBeforeFinalization,
-} from '../src/factorio/verification.js'
-import { canonicalJson, digest } from '../src/factorio/canonical.js'
+} from '../src/verification.js'
+import { canonicalJson, digest } from '../src/canonical.js'
 import { MemoryTraceObjectStore } from 'milkie'
-import type { CellExecutionRecord, RunPins } from '../src/factorio/types.js'
+import type { CellExecutionRecord, RunPins } from '../src/types.js'
 
 test('子进程请求到达硬超时后终止，而不是永久等待', async () => {
   const child = new JsonLineProcess(

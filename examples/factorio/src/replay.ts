@@ -42,9 +42,9 @@ import {
   type HarnessPinsV1,
   normalizePinsV1,
   normalizeEvidenceHarness,
-} from '../harness/index.js'
+} from '../../../src/harness/index.js'
 
-import { renderCardDoc } from '../catalog/render.js'
+import { renderCardDoc } from '../../../src/catalog/render.js'
 import { runHarness } from './harness.js'
 import { CHILD_REPLAY_SAFETY_WALL_MS } from './recursive-model.js'
 import type {

@@ -1,6 +1,6 @@
 # Factorio example（Helix）
 
-这是 Helix 的 **Factorio 域 example 族**：与 Factorio / FLE 相关的能力、剧本和验收都内聚在这里（`examples/factorio` + `src/factorio`），不拆成多个平行 top-level example。
+这是 Helix 的 **Factorio 域 example 族**：与 Factorio / FLE 相关的能力、剧本和验收都内聚在这里（`examples/factorio`），不拆成多个平行 top-level example。
 
 Helix 以后会有 **很多 examples**。和 Factorio **无关** 的场景应另开 example，不要硬塞进本目录。
 
@@ -22,8 +22,8 @@ Helix 以后会有 **很多 examples**。和 Factorio **无关** 的场景应另
 | **P0 环境 smoke** | `npm run verify:factorio:live-smoke` | 固定 mining 程序 | 真容器 + FLE 可改游戏状态 |
 | **P1 Agent 主路径** | `npm run verify:factorio:live` | 模型写 cell；#5 `models.call` 可用 | model-owned RLM + Trace + finalization |
 | **P1 Replay** | `npm run verify:factorio:replay -- --run <runId>` | 禁 live fallback | 与 Live 同 run 零 live Replay |
-| **P2 Session / async** | `npm run verify:factorio:live:session`（`HELIX_SESSION_ASYNC=1`） | **opt-in**，非默认 | pins v5 + 持久 session Host；契约单测见 `test/session-async.test.ts` |
-| **P3 Harness 进化** | `helix refine … --host-module src/factorio/refinement-host.ts` 后 `verify:factorio:live -- --overlay <ref>` | opt-in | recorded P1 → propose/evaluate/request/promote → 下一轮 live 显式 overlay；旧 replay 不漂移 |
+| **P2 Session / async** | `npm run verify:factorio:live:session`（`HELIX_SESSION_ASYNC=1`） | **opt-in**，非默认 | pins v5 + 持久 session Host；契约单测见 `examples/factorio/test/session-async.test.ts` |
+| **P3 Harness 进化** | `npm run factorio:refine -- refine … --host-module examples/factorio/src/refinement-host.ts` 后 `verify:factorio:live -- --overlay <ref>` | opt-in | recorded P1 → propose/evaluate/request/promote → 下一轮 live 显式 overlay；旧 replay 不漂移 |
 
 - **P1 是默认主路径**：不设 `HELIX_SESSION_ASYNC` 时行为与 pins 保持 #5 时代（harness `factorio-rlm/v4` 等），避免无声升级。
 - **P2 仍属本 Factorio example**，不是第二个 top-level example；只是第二条剧本/开关。
@@ -109,25 +109,24 @@ npm run verify:factorio:replay -- --run <runId>
 
 ## P3 — recorded run → overlay → 下一轮 live
 
-P3 把 #13 refinement CLI 接到本 example 的 RCS Host。generation/evaluation 的尺子是 `task_verification` 派生指标（`FACTORIO_EXTRACTOR_DIGEST`），不是 fixture 常数。无 Docker 时以 `test/factorio/refinement-host.test.ts` 为可判定契约，缺环境不算通过。
+P3 把 #13 refinement CLI 接到本 example 的 RCS Host。generation/evaluation 的尺子是 `task_verification` 派生指标（`FACTORIO_EXTRACTOR_DIGEST`），不是 fixture 常数。无 Docker 时以 `examples/factorio/test/refinement-host.test.ts` 为可判定契约，缺环境不算通过。
 
 ```bash
 # 1. 已有终结的 P1 recorded run（artifacts/factorio/runs/<runId>/live.json）
-npm run build
 
 # 2. 用 Factorio Host 走 propose → evaluate → request → manual promote
 #    （assertion / policy / suite 由 Host 与 HRCA 夹具提供；见 docs/refinement.md）
-node dist/refinement/cli.js refine propose --host-module src/factorio/refinement-host.ts \
+npm run factorio:refine -- refine propose --host-module examples/factorio/src/refinement-host.ts \
   --assertion assertion.json --proposal-id p3-1 \
   --source-runs <runId> --baseline <baselineRef> --policy <policyRef>
 
-node dist/refinement/cli.js refine evaluate --host-module src/factorio/refinement-host.ts \
+npm run factorio:refine -- refine evaluate --host-module examples/factorio/src/refinement-host.ts \
   --assertion assertion.json --candidate <candidateRef> --policy <policyRef> --suite <suiteRef>
 
-node dist/refinement/cli.js refine request --host-module src/factorio/refinement-host.ts \
+npm run factorio:refine -- refine request --host-module examples/factorio/src/refinement-host.ts \
   --assertion assertion.json --report <report.json>
 
-node dist/refinement/cli.js refine promote --manual --host-module src/factorio/refinement-host.ts \
+npm run factorio:refine -- refine promote --manual --host-module examples/factorio/src/refinement-host.ts \
   --assertion assertion.json --request <requestRef> --policy <policyRef>
 
 # 3. 下一轮 live 显式选择已 promote overlay；旧 run replay 仍用当时 pins
@@ -135,17 +134,17 @@ npm run verify:factorio:live -- --overlay overlay:<id>@0#<hash>
 npm run verify:factorio:replay -- --run <oldRunId>
 ```
 
-`createRefinementCommandHost` 导出在 `src/factorio/refinement-host.ts`。两臂 FLE 真跑需要集群；契约测试覆盖投影 fail-closed、outcome 抽取、reserved overlay 拒绝与 promotion 后选择。
+`createRefinementCommandHost` 导出在 `examples/factorio/src/refinement-host.ts`。两臂 FLE 真跑需要集群；契约测试覆盖投影 fail-closed、outcome 抽取、reserved overlay 拒绝与 promotion 后选择。
 
 ## 布局
 
 ```text
-examples/factorio/          # Python：cluster、smoke、workers、pytest
+examples/factorio/          # Factorio example：TS、Python、契约测试
+  src/                     # TS：harness、live/replay、#5 recursive、#7 session
+  test/                    # 无容器 TypeScript 契约测试
   workers/                 # kernel / bridge / preflight
   verify_live.py           # P0 smoke
-src/factorio/               # TS：harness、live/replay、#5 recursive、#7 session
 artifacts/factorio/         # traces、objects、runs、sessions、final-outcomes
-test/*factorio* / session-async / recursive-model  # 无容器契约测试
 ```
 
 ## 测试

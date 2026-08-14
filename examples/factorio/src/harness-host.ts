@@ -9,8 +9,8 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { renderCardDoc } from '../catalog/render.js'
-import { resolveCapabilitySet } from '../catalog/binding-set-map.js'
+import { renderCardDoc } from '../../../src/catalog/render.js'
+import { resolveCapabilitySet } from '../../../src/catalog/binding-set-map.js'
 import {
   bindControlPlaneText,
   durableStoreSnapshotPath,
@@ -28,8 +28,8 @@ import {
   HarnessStateStore,
   LegacySelectionRegistryStore,
   baselineContentHash,
-} from '../harness/index.js'
-import { RefinementControlStore } from '../refinement/control-store.js'
+} from '../../../src/harness/index.js'
+import { RefinementControlStore } from '../../../src/refinement/control-store.js'
 import {
   FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT,
   FACTORIO_V4_HARNESS_DOCUMENT,

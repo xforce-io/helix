@@ -12,7 +12,7 @@ import {
   MIN_SPAWN_RESERVE_TOKENS,
   SESSION_ASYNC_VERSION,
   SESSION_CONTROL_MAILBOX_ID,
-} from '../src/factorio/session-async-constants.js'
+} from '../src/session-async-constants.js'
 import {
   applySpawnReserve,
   assertSessionEffectsExclusive,
@@ -22,12 +22,12 @@ import {
   projectSessionAsyncCapability,
   refundSpawnReserve,
   settleSpawnReserve,
-} from '../src/factorio/session-async.js'
+} from '../src/session-async.js'
 import {
   CHILD_DEFAULT_PERMISSIONS,
   PARENT_PERMISSIONS,
   SessionCapabilityRegistry,
-} from '../src/factorio/session-capability.js'
+} from '../src/session-capability.js'
 import {
   SessionStore,
   buildCanonicalProjection,
@@ -37,22 +37,22 @@ import {
   materializeSessionView,
   projectionHashOf,
   sha256Hex,
-} from '../src/factorio/session-store.js'
+} from '../src/session-store.js'
 import {
   loadSessionFromDiskSync,
   writeCrashWindowTmpCheckpointSync,
-} from '../src/factorio/session-persistence.js'
-import { SessionAsyncHost } from '../src/factorio/session-async-host.js'
-import { pinsSessionAsync, pinsV4 } from '../src/factorio/cli-common.js'
+} from '../src/session-persistence.js'
+import { SessionAsyncHost } from '../src/session-async-host.js'
+import { pinsSessionAsync, pinsV4 } from '../src/cli-common.js'
 import {
   pinsGateCheck,
   pinsGateCheckV4,
   rejectLegacyPins,
   sessionEvidenceChecks,
   singleEffectMutualExclusionCheck,
-} from '../src/factorio/verification.js'
-import type { CellExecutionRecord, RunPins } from '../src/factorio/types.js'
-import { assertEffectsExclusive } from '../src/factorio/recursive-model.js'
+} from '../src/verification.js'
+import type { CellExecutionRecord, RunPins } from '../src/types.js'
+import { assertEffectsExclusive } from '../src/recursive-model.js'
 
 // ---------- fixtures ----------
 

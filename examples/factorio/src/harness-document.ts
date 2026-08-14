@@ -8,7 +8,7 @@
 import type {
   ExampleScenarioAdapter,
   HarnessDocument,
-} from '../harness/index.js'
+} from '../../../src/harness/index.js'
 
 /** Historical v4 strategy payload (code/protocol pin factorio-rlm/v4). */
 export const FACTORIO_V4_HARNESS_DOCUMENT: HarnessDocument = {

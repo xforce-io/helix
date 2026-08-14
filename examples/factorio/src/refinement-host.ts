@@ -8,11 +8,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import type { IIOPort } from 'milkie'
-import type { HarnessStateRef } from '../harness/index.js'
-import type { RefinementControlStore } from '../refinement/control-store.js'
-import type { RefinementCommandHost } from '../refinement/commands.js'
-import { createMilkieRefinementAdapter } from '../refinement/milkie-adapter.js'
-import type { RefinementTrustBundleV1 } from '../refinement/trust.js'
+import type { HarnessStateRef } from '../../../src/harness/index.js'
+import type { RefinementControlStore } from '../../../src/refinement/control-store.js'
+import type { RefinementCommandHost } from '../../../src/refinement/commands.js'
+import { createMilkieRefinementAdapter } from '../../../src/refinement/milkie-adapter.js'
+import type { RefinementTrustBundleV1 } from '../../../src/refinement/trust.js'
 import { ARTIFACT_ROOT, LIVE_WALL_TIMEOUT_MS, parseLiveEvidenceText } from './cli-common.js'
 import {
   createFactorioHostBundle,
@@ -200,4 +200,3 @@ function readRecordedEvalEvidence(runRef: string): LiveEvidence | undefined {
     return undefined
   }
 }
-
