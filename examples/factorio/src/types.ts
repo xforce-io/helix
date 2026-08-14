@@ -1,4 +1,4 @@
-import type { HarnessEvidenceSlice, HarnessPinsV1 } from '../harness/index.js'
+import type { HarnessEvidenceSlice, HarnessPinsV1 } from '../../../src/harness/index.js'
 
 
 export interface ObjectRef {

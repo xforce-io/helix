@@ -21,7 +21,7 @@ Approved designs:
 Helix will host **many** examples over time. Domain rule:
 
 - **Factorio-related** paths, scripts, and acceptance stay **cohesive** in the
-  Factorio example family (`examples/factorio` + `src/factorio`). One example may
+  Factorio example family (`examples/factorio`). One example may
   expose multiple paths (default FLE agent run, opt-in session/async, smoke).
 - **Non-Factorio** scenarios get **separate** top-level examples; do not force
   them into the Factorio tree.

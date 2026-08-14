@@ -2,26 +2,29 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 
-import { pins } from '../../src/factorio/cli-common.js'
+import { pins } from '../src/cli-common.js'
 import {
   assembleFactorioRun,
   createFactorioHostBundle,
   openFactorioReplayHost,
-} from '../../src/factorio/harness-host.js'
+} from '../src/harness-host.js'
 import {
   createFactorioRefinementCommandHost,
   extractFactorioEvaluationMetrics,
   FACTORIO_EXTRACTOR_DIGEST,
   parseHarnessStateRef,
   projectFactorioGenerationInput,
-} from '../../src/factorio/refinement-host.js'
-import { reconstructFactorioReplayHarness } from '../../src/factorio/replay.js'
-import type { LiveEvidence } from '../../src/factorio/types.js'
-import { RefinementError } from '../../src/refinement/errors.js'
-import { RefinementWorkflow } from '../../src/refinement/workflow.js'
-import { signedConfiguration } from '../refinement/fixtures.js'
+} from '../src/refinement-host.js'
+import { reconstructFactorioReplayHarness } from '../src/replay.js'
+import type { LiveEvidence } from '../src/types.js'
+import { RefinementError } from '../../../src/refinement/errors.js'
+import { RefinementWorkflow } from '../../../src/refinement/workflow.js'
+import { signedConfiguration } from '../../../test/refinement/fixtures.js'
+
+const REPO_ROOT = path.resolve(import.meta.dirname, '../../..')
 
 function recordedLive(runId: string, success: boolean): LiveEvidence {
   return {
@@ -91,6 +94,28 @@ test('S2 Factorio exports a loadable refinement command host', () => {
   assert.equal(typeof host.adapter.generate, 'function')
   assert.ok(host.rcs)
   assert.equal(host.trustBundle.schemaVersion, 'helix.refinement-trust-bundle/v1')
+})
+
+test('S2 refinement CLI loads the relocated Factorio Host', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'helix-factorio-cli-'))
+  try {
+    const result = spawnSync(
+      path.join(REPO_ROOT, 'node_modules/.bin/tsx'),
+      [
+        path.join(REPO_ROOT, 'src/refinement/cli.ts'),
+        'refine',
+        'show',
+        'generation-job',
+        '--host-module', path.join(REPO_ROOT, 'examples/factorio/src/refinement-host.ts'),
+        '--ref', `generation-job:missing@0#${'0'.repeat(64)}`,
+      ],
+      { cwd: root, encoding: 'utf8' },
+    )
+    assert.notEqual(result.status, 0)
+    assert.doesNotMatch(result.stderr, /unknown file extension|Cannot find module|host module must export/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('S3 live overlay selection admits only promoted refs', async () => {

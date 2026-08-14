@@ -28,7 +28,7 @@ import {
   settleReserve,
   recomputeRequestDigestFromEffect,
   verifyRequestDigestPartition,
-} from '../src/factorio/recursive-model.js'
+} from '../src/recursive-model.js'
 import {
   buildChildRunIds,
   c1NeverStartedEventCheck,
@@ -44,19 +44,19 @@ import {
   requestDigestReplayChecks,
   singleEffectMutualExclusionCheck,
   successfulRecursiveCallCheck,
-} from '../src/factorio/verification.js'
+} from '../src/verification.js'
 import type {
   CellExecutionRecord,
   ModelEffect,
   RunPins,
-} from '../src/factorio/types.js'
+} from '../src/types.js'
 import {
   LiveCellExecutor,
   type ChildPortFactory,
   type ChildPortHandle,
-} from '../src/factorio/live-executor.js'
-import { digest } from '../src/factorio/canonical.js'
-import { childLlmResponseHashCheck, replayChildRun } from '../src/factorio/replay.js'
+} from '../src/live-executor.js'
+import { digest } from '../src/canonical.js'
+import { childLlmResponseHashCheck, replayChildRun } from '../src/replay.js'
 
 
 const pins: RunPins = {

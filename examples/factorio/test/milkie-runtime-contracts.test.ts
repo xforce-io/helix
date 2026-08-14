@@ -18,16 +18,16 @@ import { DefaultIOPort } from 'milkie/dist/runtime/IOPort.js'
 import { CausalCursor } from 'milkie/dist/trace/CausalCursor.js'
 import { RecordingIOPort } from 'milkie/dist/trace/RecordingIOPort.js'
 import type { Event } from 'milkie/dist/trace/types.js'
-import { runHarness } from '../src/factorio/harness.js'
+import { runHarness } from '../src/harness.js'
 import {
   assembleFactorioRun,
   createFactorioHostBundle,
-} from '../src/factorio/harness-host.js'
+} from '../src/harness-host.js'
 import {
   finalizationEvidenceEventIds,
   traceChecksBeforeFinalization,
-} from '../src/factorio/verification.js'
-import type { RunPins } from '../src/factorio/types.js'
+} from '../src/verification.js'
+import type { RunPins } from '../src/types.js'
 
 const basePins: RunPins = {
   model: 'test-model',

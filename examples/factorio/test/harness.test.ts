@@ -6,18 +6,18 @@ import type {
   ToolInvocationOptions,
 } from 'milkie/dist/runtime/IOPort.js'
 import type { ModelRequest, ModelResponse } from 'milkie'
-import { digest } from '../src/factorio/canonical.js'
-import { runHarness } from '../src/factorio/harness.js'
+import { digest } from '../src/canonical.js'
+import { runHarness } from '../src/harness.js'
 import {
   assembleFactorioRun,
   createFactorioHostBundle,
-} from '../src/factorio/harness-host.js'
+} from '../src/harness-host.js'
 import type {
   CellExecutionRecord,
   FactorioEffect,
   ObjectRef,
   RunPins,
-} from '../src/factorio/types.js'
+} from '../src/types.js'
 
 const basePins: RunPins = {
   model: 'test-model',

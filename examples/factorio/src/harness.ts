@@ -26,7 +26,7 @@ import {
   assertControlPlaneBinding,
   assertFrozenHarnessMatchesPins,
   type FrozenHarnessSlice,
-} from '../harness/index.js'
+} from '../../../src/harness/index.js'
 
 
 export const EXECUTE_CELL_TOOL = 'execute_cell'

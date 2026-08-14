@@ -6,7 +6,7 @@ import {
   HarnessError,
   parseHarnessJsonText,
   type JsonTextValue,
-} from '../harness/index.js'
+} from '../../../src/harness/index.js'
 import { canonicalJson } from './canonical.js'
 import type {
   FinalizationSummary,

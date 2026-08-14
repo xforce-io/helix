@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, utimesSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync, utimesSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
@@ -12,7 +12,7 @@ import {
   CapabilityCatalogRegistry,
   setDefaultRegistryForTests,
   type CapabilityCard,
-} from '../../src/catalog/index.js'
+} from '../../../src/catalog/index.js'
 import {
   assertManifestProvenance,
   baselineContentHash,
@@ -50,35 +50,35 @@ import {
   type HarnessDocument,
   type HarnessOverlay,
   type HarnessStateRef,
-} from '../../src/harness/index.js'
+} from '../../../src/harness/index.js'
 import {
   assembleFactorioRun,
   createFactorioHostBundle,
   formFactorioAvailableCatalogRefs,
   openFactorioReplayHost,
-} from '../../src/factorio/harness-host.js'
+} from '../src/harness-host.js'
 import {
   FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT,
   FACTORIO_V4_HARNESS_DOCUMENT,
   FACTORIO_V5_HARNESS_DOCUMENT,
   createFactorioScenarioAdapter,
-} from '../../src/factorio/harness-document.js'
+} from '../src/harness-document.js'
 import {
   parseLiveEvidenceText,
   pinsV4,
   pinsSessionAsync,
-} from '../../src/factorio/cli-common.js'
-import { runHarness } from '../../src/factorio/harness.js'
-import { reconstructFactorioReplayHarness } from '../../src/factorio/replay.js'
+} from '../src/cli-common.js'
+import { runHarness } from '../src/harness.js'
+import { reconstructFactorioReplayHarness } from '../src/replay.js'
 import {
   LiveCellExecutor,
   type ChildPortFactory,
   type ChildPortHandle,
-} from '../../src/factorio/live-executor.js'
+} from '../src/live-executor.js'
 import { MemoryTraceObjectStore } from 'milkie'
 
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..')
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../..')
 const HARNESS_SRC = join(REPO_ROOT, 'src/harness')
 
 const CARD_A1: CatalogCardRef = { id: 'helix.models', version: '1.0.0' }
@@ -229,6 +229,28 @@ test('S1.core-has-no-factorio-imports', () => {
       /factorio|fle|iron_ore|bindingSet|factorio-rlm/i.test(text),
       false,
       `${file} must not reference Factorio scenario details`,
+    )
+  }
+})
+
+test('S1.core-has-no-example-imports-or-scenario-directory', () => {
+  assert.equal(existsSync(join(REPO_ROOT, 'src/factorio')), false)
+  const roots = ['catalog', 'harness', 'refinement'].map(name => join(REPO_ROOT, 'src', name))
+  const files: string[] = [join(REPO_ROOT, 'src/index.ts')]
+  while (roots.length > 0) {
+    const current = roots.pop()!
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const child = join(current, entry.name)
+      if (entry.isDirectory()) roots.push(child)
+      else if (entry.isFile() && entry.name.endsWith('.ts')) files.push(child)
+    }
+  }
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8')
+    assert.doesNotMatch(
+      text,
+      /(?:\bfrom\s*|\bimport\s*\()\s*['"][^'"]*(?:^|\/)examples\//,
+      `${file} must not import an example`,
     )
   }
 })
@@ -753,7 +775,7 @@ test('S3.fail-closed-schema-ref-overlay-pin-latest', () => {
   expectHarnessError(
     () =>
       store.select(
-        { baselineRef, sourcePath: 'src/factorio/harness.ts' } as never,
+        { baselineRef, sourcePath: 'examples/factorio/src/harness.ts' } as never,
         available,
       ),
     'HARNESS_NONDETERMINISTIC_SELECTION',
@@ -3439,4 +3461,3 @@ test('review.B2.replay-rejects-corrupted-HarnessPinsV1-and-evidence-extensions',
     'HARNESS_REF_INVALID',
   )
 })
-
