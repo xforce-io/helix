@@ -19,6 +19,8 @@
     "check": "tsc -p tsconfig.json --noEmit && tsc -p examples/factorio/tsconfig.json",
     "test": "npm run check && npm run test:unit",
     "test:unit": "tsx --test test/*.test.ts test/catalog/*.test.ts test/refinement/*.test.ts examples/factorio/test/*.test.ts && uv run --project examples/factorio python -m unittest discover -s examples/factorio/tests -p 'test_*.py'",
+    "test:e2e": "npm run test:e2e:fixture",
+    "test:e2e:fixture": "tsx --test test/e2e/*.test.ts",
     "factorio:cluster:start": "uv run --project examples/factorio python examples/factorio/cluster.py start",
     "factorio:cluster:stop": "uv run --project examples/factorio python examples/factorio/cluster.py stop",
     "verify:factorio:live-smoke": "uv run --project examples/factorio python examples/factorio/verify_live.py",
