@@ -73,9 +73,38 @@ Requires Node.js 20 or newer.
 
 ```bash
 npm install
-npm test
+npm test          # runs check + unit tests + system e2e
 npm run build
 ```
+
+### System end-to-end test
+
+The system e2e (`test/e2e/system.e2e.test.ts`) verifies the complete Helix core
+loop in a **deterministic, credential-free** manner:
+
+1. **Catalog**: loads production cards via `listProductionCards` /
+   `resolveCapabilitySet` / `resolveCardRefs`; unknown/missing versions
+   fail-closed.
+2. **Harness**: `selectValidateResolveFreeze` with a fixture scenario adapter
+   (no live LLM, no Docker, no Factorio cluster).
+3. **Replay**: `replayFromRecordedPins` produces stable `harnessContentHash`.
+4. **Refinement**: propose → two-arm evaluate → request → manual promote.
+5. **Authority**: model/skill subjects cannot promote (0 promotions).
+6. **Evolution**: unpromoted overlay fails on `external` route; promoted overlay
+   succeeds on next-run selection; old replay hash unchanged after promotion.
+
+The test is included in `npm test` and runs as part of the default CI gate. To
+run only the e2e suite:
+
+```bash
+npm run test:e2e
+```
+
+A live-LLM gate (`HELIX_E2E_LIVE=1`) is reserved for future integration but
+explicitly skips if credentials are missing; it does **not** run in default
+`npm test`.
+
+### Factorio example
 
 The real Factorio gate additionally requires Docker, `uv`, a configured
 Anthropic-compatible endpoint (`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
