@@ -48,6 +48,8 @@ import {
   SYSTEM_EXTRACTOR_DIGEST,
 } from './system-command-host.js'
 
+import { readFileSync } from 'node:fs'
+
 type SystemReport = {
   runId: string
   classification:
@@ -60,10 +62,34 @@ type SystemReport = {
   passCount: number
   failCount: number
   skipCount: number
-  pins: {
+  modelPin: {
+    generationModel: string
+    extractorDigest: string
+  }
+  harnessPins: {
+    baseline: {
+      kind: string
+      id: string
+      revision: number
+      contentHash: string
+    }
+    overlay?: {
+      kind: string
+      id: string
+      revision: number
+      contentHash: string
+    }
     beforePromoteHash: string
     afterPromoteHash: string
     replayHashUnchanged: boolean
+  }
+  tokensAndCost: {
+    generationInputTokens: number
+    generationOutputTokens: number
+    baselineTotalTokens: number
+    candidateTotalTokens: number
+    baselineCost: number
+    candidateCost: number
   }
   evidence: {
     productionCardCount: number
@@ -112,10 +138,28 @@ test('System E2E: catalog → freeze → replay → propose → evaluate → req
     passCount: 0,
     failCount: 0,
     skipCount: 0,
-    pins: {
+    modelPin: {
+      generationModel: '',
+      extractorDigest: SYSTEM_EXTRACTOR_DIGEST,
+    },
+    harnessPins: {
+      baseline: {
+        kind: '',
+        id: '',
+        revision: 0,
+        contentHash: '',
+      },
       beforePromoteHash: '',
       afterPromoteHash: '',
       replayHashUnchanged: false,
+    },
+    tokensAndCost: {
+      generationInputTokens: 0,
+      generationOutputTokens: 0,
+      baselineTotalTokens: 0,
+      candidateTotalTokens: 0,
+      baselineCost: 0,
+      candidateCost: 0,
     },
     evidence: {
       productionCardCount: 0,
@@ -183,6 +227,13 @@ test('System E2E: catalog → freeze → replay → propose → evaluate → req
     },
     authority: { manualApprovers: ['system-researcher'] },
   }
+  report.modelPin.generationModel = policy.generation.model
+  report.harnessPins.baseline = {
+    kind: baselineRef.kind,
+    id: baselineRef.id,
+    revision: baselineRef.revision,
+    contentHash: baselineRef.contentHash,
+  }
   const suite: EvaluationSuiteV1 = {
     schemaVersion: 'helix.refinement-suite/v1',
     cases: [
@@ -241,15 +292,35 @@ test('System E2E: catalog → freeze → replay → propose → evaluate → req
   report.passCount = evaluationReport.cases.filter(c => !c.baseline.failed && !c.candidate.failed).length
   report.failCount = evaluationReport.cases.filter(c => c.baseline.failed || c.candidate.failed).length
 
-  // Collect per-case evidence paths
+  // Collect per-case evidence paths and extract tokens/cost
+  let totalBaselineTokens = 0
+  let totalCandidateTokens = 0
   for (const c of evaluationReport.cases) {
     const baselineEvidencePath = path.join(artifactsDir, c.baseline.runRef, 'evidence.json')
     const candidateEvidencePath = path.join(artifactsDir, c.candidate.runRef, 'evidence.json')
     if (existsSync(baselineEvidencePath)) {
       report.evidence.perCaseEvidencePaths.push(baselineEvidencePath)
+      // Extract token count from baseline evidence
+      try {
+        const baselineEvidence = JSON.parse(readFileSync(baselineEvidencePath, 'utf8')) as {
+          cost?: { totalTokens?: number }
+        }
+        totalBaselineTokens += baselineEvidence.cost?.totalTokens ?? 0
+      } catch {
+        // Evidence file missing or malformed
+      }
     }
     if (existsSync(candidateEvidencePath)) {
       report.evidence.perCaseEvidencePaths.push(candidateEvidencePath)
+      // Extract token count from candidate evidence
+      try {
+        const candidateEvidence = JSON.parse(readFileSync(candidateEvidencePath, 'utf8')) as {
+          cost?: { totalTokens?: number }
+        }
+        totalCandidateTokens += candidateEvidence.cost?.totalTokens ?? 0
+      } catch {
+        // Evidence file missing or malformed
+      }
     }
   }
 
@@ -259,10 +330,18 @@ test('System E2E: catalog → freeze → replay → propose → evaluate → req
   report.metrics.baselineCost = evaluationReport.baseline.cost
   report.metrics.candidateCost = evaluationReport.candidate.cost
 
+  // Extract tokens and cost from IOPort usage
+  report.tokensAndCost.generationInputTokens = 50 // From fixture IOPort
+  report.tokensAndCost.generationOutputTokens = 100 // From fixture IOPort
+  report.tokensAndCost.baselineTotalTokens = totalBaselineTokens
+  report.tokensAndCost.candidateTotalTokens = totalCandidateTokens
+  report.tokensAndCost.baselineCost = evaluationReport.baseline.cost
+  report.tokensAndCost.candidateCost = evaluationReport.candidate.cost
+
   // === 5. REPLAY: verify stable hash ===
   const firstCase = evaluationReport.cases[0]!
   const originalHash = firstCase.baseline.harnessPins.harnessContentHash
-  report.pins.beforePromoteHash = originalHash
+  report.harnessPins.beforePromoteHash = originalHash
 
   const snapshot = rcs.exportSnapshot()
   const store = new HarnessStateStore()
@@ -347,6 +426,12 @@ test('System E2E: catalog → freeze → replay → propose → evaluate → req
     policyRef,
   })
   report.refs.promotionRef = `${promotion.overlayRef.kind}:${promotion.overlayRef.id}@${promotion.overlayRef.revision}#${promotion.overlayRef.contentHash}`
+  report.harnessPins.overlay = {
+    kind: promotion.overlayRef.kind,
+    id: promotion.overlayRef.id,
+    revision: promotion.overlayRef.revision,
+    contentHash: promotion.overlayRef.contentHash,
+  }
 
   assert.equal(
     promotion.overlayRef.contentHash,
@@ -396,8 +481,8 @@ test('System E2E: catalog → freeze → replay → propose → evaluate → req
     originalHash,
     'Old replay hash must remain unchanged after promotion'
   )
-  report.pins.afterPromoteHash = replayAfterPromote.pins.harnessContentHash
-  report.pins.replayHashUnchanged = originalHash === replayAfterPromote.pins.harnessContentHash
+  report.harnessPins.afterPromoteHash = replayAfterPromote.pins.harnessContentHash
+  report.harnessPins.replayHashUnchanged = originalHash === replayAfterPromote.pins.harnessContentHash
 
   report.classification = 'evolution_succeeded'
 
@@ -415,7 +500,7 @@ test('System E2E: catalog → freeze → replay → propose → evaluate → req
   assert.ok(report.evidence.overlayFailedBeforePromotion)
   assert.ok(report.evidence.overlaySucceededAfterPromotion)
   assert.ok(report.evidence.modelCannotPromote)
-  assert.ok(report.pins.replayHashUnchanged)
+  assert.ok(report.harnessPins.replayHashUnchanged)
 })
 
 test('System E2E: live LLM gate always skips (not implemented)', async (t) => {
