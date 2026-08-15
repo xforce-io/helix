@@ -17,6 +17,8 @@ import {
   type EvaluationArmResult,
 } from '../../../src/refinement/milkie-adapter.js'
 import { signActorAssertion, type ActorAssertionV1, type RefinementTrustBundleV1 } from '../../../src/refinement/trust.js'
+import { validateFactorioOverlayProtocol } from './overlay-protocol-guard.js'
+import { admitGeneratedOverlayPayload } from '../../../src/refinement/overlay-admission.js'
 import {
   ARTIFACT_ROOT,
   HARNESS_STATE_ROOT,
@@ -202,7 +204,25 @@ export function createFactorioRefinementCommandHost(options: {
           `Factorio refinement policy model must equal ANTHROPIC_MODEL (${generationModel})`,
         )
       }
-      return baseAdapter.generate(input)
+      const result = await baseAdapter.generate(input)
+      
+      // Fail-closed: validate that generated overlay preserves Factorio protocol
+      try {
+        const admitted = admitGeneratedOverlayPayload({
+          payloadText: result.payloadText,
+          baseBaselineRef: input.baselineRef,
+        })
+        const protocolError = validateFactorioOverlayProtocol(admitted.overlay)
+        if (protocolError !== undefined) {
+          throw new Error(`Factorio protocol violation: ${protocolError}`)
+        }
+      } catch (error) {
+        throw new Error(
+          `generated overlay fails Factorio protocol guard: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      
+      return result
     },
   }
   return {

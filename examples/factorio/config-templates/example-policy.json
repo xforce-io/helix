@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "helix.refinement-policy/v1",
+  "generation": {
+    "model": "REPLACE_WITH_ANTHROPIC_MODEL",
+    "maxOutputTokens": 4096
+  },
+  "extractorDigest": "REPLACE_WITH_EXTRACTOR_DIGEST_64_HEX",
+  "gate": {
+    "minQualityDelta": 0.1,
+    "maxCostRatio": 1.2,
+    "maxLatencyRatio": 1.5,
+    "maxFailureRateDelta": 0.05
+  },
+  "authority": {
+    "manualApprovers": [
+      "researcher-alice",
+      "researcher-bob"
+    ]
+  }
+}
