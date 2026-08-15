@@ -112,7 +112,7 @@ function fixtureHost(bundle: ReturnType<typeof createFactorioHostBundle>) {
     innerPort: stubPort(JSON.stringify({
       schemaVersion: 'helix.harness-overlay/v1',
       baseBaselineRef: bundle.defaultBaselineRef,
-      changes: { systemInstructionTemplate: 'refined factorio control' },
+      changes: { taskNarrativeTemplate: 'refined factorio task narrative' },
     })),
     readLive: runId => recordedLive(runId, false),
     runArm: ({ arm, reservedRunRef }) => ({

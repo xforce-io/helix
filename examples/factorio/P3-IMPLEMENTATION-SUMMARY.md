@@ -13,29 +13,19 @@
 - `examples/factorio/src/refinement-host.ts`：集成到 refinement host
 
 #### 关键功能
-1. **必需协议片段检查**
-   - `factorio.reset`：确保环境重置指令存在
-   - `First environment effect`：确保首次效应规则存在
-   - `import`：确保 import 禁止规则存在
+1. **不可变 system instruction**
+   - overlay 不得替换承载完整 Factorio 协议的 `systemInstructionTemplate`
 
-2. **强制性语言验证**
-   - 拒绝弱建议：`prefer`, `should`
-   - 要求强禁止：`never`, `forbidden`, `must not`, `do not`
-
-3. **具体规则验证**
-   - **first-reset 规则**：必须包含 "first"/"initial" + "reset"/"factorio.reset"
-   - **no-import 规则**：必须包含 "import" + 强禁止词
+2. **精确协议规则检查**
+   - 修改 `protocolRules` 时，必须逐字保留 first-reset 与 no-import 两条规则
+   - 不依赖模型生成文本的启发式关键词匹配
 
 #### 测试覆盖
 - `examples/factorio/test/overlay-protocol-guard.test.ts`
 - 9 个单元测试，覆盖：
-  - 允许不修改 protocolRules 的 overlay
-  - 允许保留所有协议的 overlay
-  - 拒绝丢失 factorio.reset 片段的 overlay
-  - 拒绝丢失 import 片段的 overlay
-  - 拒绝丢失 first-reset 规则的 overlay
-  - 拒绝弱 no-import 规则的 overlay
-  - 接受各种合法的规则变体
+  - 允许不修改不可变控制项的 overlay
+  - 拒绝覆盖 system instruction
+  - 拒绝丢失或弱化 first-reset / no-import 规则
 
 ### ✅ 任务 2：操作员发布路径
 
@@ -150,10 +140,9 @@ Factorio protocol violation: generated overlay drops no-import protocol rule
   "schemaVersion": "helix.harness-overlay/v1",
   "baseBaselineRef": {...},
   "changes": {
-    "systemInstructionTemplate": "Improved system instructions...",
     "protocolRules": [
       "First environment effect must call factorio.reset() exactly once.",
-      "Never add import statements in action strings.",
+      "Never use import statements in outer cells or Factorio action strings.",
       "Submit at most one external effect per cell."
     ]
   }

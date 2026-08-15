@@ -10,25 +10,20 @@
  * Requires ANTHROPIC_MODEL environment variable for policy generation.model validation.
  */
 
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { signConfiguration } from '../../src/refinement/trust.js'
 import type { RefinementPolicyV1, EvaluationSuiteV1 } from '../../src/refinement/workflow.js'
-import { FACTORIO_REFINEMENT_FIXTURE, HARNESS_STATE_ROOT } from './src/cli-common.js'
+import { HARNESS_STATE_ROOT } from './src/cli-common.js'
+import { FACTORIO_REFINEMENT_FIXTURE } from './src/refinement-host.js'
+
+const REPOSITORY_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name)
   return index === -1 ? undefined : process.argv[index + 1]
-}
-
-function requireArg(name: string): string {
-  const value = argument(name)
-  if (value === undefined || value.length === 0) {
-    throw new Error(`${name} is required`)
-  }
-  return value
 }
 
 function readJsonFile<T>(filePath: string): T {
@@ -37,6 +32,43 @@ function readJsonFile<T>(filePath: string): T {
   } catch (error) {
     throw new Error(`failed to read ${filePath}: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+export function refinementAdminArgs(input: {
+  command: 'publish-policy' | 'publish-suite'
+  id: string
+  configurationFlag: '--policy' | '--suite'
+  configurationFile: string
+  issuer: string
+  keyId: string
+  signature: string
+}): string[] {
+  return [
+    '--import',
+    'tsx',
+    'src/refinement/cli.ts',
+    'refinement-admin',
+    input.command,
+    '--host-module',
+    'examples/factorio/src/refinement-host.ts',
+    '--id',
+    input.id,
+    input.configurationFlag,
+    input.configurationFile,
+    '--issuer',
+    input.issuer,
+    '--key-id',
+    input.keyId,
+    '--signature',
+    input.signature,
+  ]
+}
+
+function publishConfiguration(input: Parameters<typeof refinementAdminArgs>[0]): string {
+  return execFileSync(process.execPath, refinementAdminArgs(input), {
+    encoding: 'utf8',
+    cwd: REPOSITORY_ROOT,
+  })
 }
 
 function validatePolicy(policy: RefinementPolicyV1, expectedModel: string): void {
@@ -113,16 +145,15 @@ async function main(): Promise<void> {
     console.log(`  generation.model: ${policy.generation.model}`)
     console.log(`  extractorDigest: ${policy.extractorDigest}`)
 
-    const result = execSync(
-      `node --import tsx src/refinement/cli.ts refinement-admin publish-policy ` +
-      `--host-module examples/factorio/src/refinement-host.ts ` +
-      `--id ${JSON.stringify(policyId)} ` +
-      `--policy ${JSON.stringify(policyFile)} ` +
-      `--issuer ${JSON.stringify(issuer)} ` +
-      `--key-id ${JSON.stringify(keyId)} ` +
-      `--signature ${JSON.stringify(signature)}`,
-      { encoding: 'utf8', cwd: path.resolve(__dirname, '../..') }
-    )
+    const result = publishConfiguration({
+      command: 'publish-policy',
+      id: policyId,
+      configurationFlag: '--policy',
+      configurationFile: policyFile,
+      issuer,
+      keyId,
+      signature,
+    })
 
     const published = JSON.parse(result)
     console.log(`✓ Published policy: ${JSON.stringify(published)}`)
@@ -139,16 +170,15 @@ async function main(): Promise<void> {
     console.log(`Publishing suite ${suiteId}...`)
     console.log(`  cases: ${suite.cases.length}`)
 
-    const result = execSync(
-      `node --import tsx src/refinement/cli.ts refinement-admin publish-suite ` +
-      `--host-module examples/factorio/src/refinement-host.ts ` +
-      `--id ${JSON.stringify(suiteId)} ` +
-      `--suite ${JSON.stringify(suiteFile)} ` +
-      `--issuer ${JSON.stringify(issuer)} ` +
-      `--key-id ${JSON.stringify(keyId)} ` +
-      `--signature ${JSON.stringify(signature)}`,
-      { encoding: 'utf8', cwd: path.resolve(__dirname, '../..') }
-    )
+    const result = publishConfiguration({
+      command: 'publish-suite',
+      id: suiteId,
+      configurationFlag: '--suite',
+      configurationFile: suiteFile,
+      issuer,
+      keyId,
+      signature,
+    })
 
     const published = JSON.parse(result)
     console.log(`✓ Published suite: ${JSON.stringify(published)}`)

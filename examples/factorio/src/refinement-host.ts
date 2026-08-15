@@ -117,7 +117,7 @@ export function projectFactorioGenerationInput(
     generationInstruction: [
       'Return exactly one JSON object and no Markdown, prose, code fence, or import.',
       'The object must be a helix.harness-overlay/v1 HarnessOverlay whose baseBaselineRef exactly equals the proposal baselineRef.',
-      'Its changes must be non-empty and limited to systemInstructionTemplate, taskNarrativeTemplate, protocolRules, stopConditions, or catalogCards.',
+      'Its changes must be non-empty and limited to taskNarrativeTemplate, protocolRules, stopConditions, or catalogCards.',
       'Do not include policy, suite, source evidence, credentials, aliases, promotion requests, or a second overlay.',
     ].join(' '),
     sourceRunRefs: [...sourceRunRefs],

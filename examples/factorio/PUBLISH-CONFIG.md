@@ -87,6 +87,10 @@ cat artifacts/factorio/harness-state/refinement-control.json | jq '.artifacts[] 
 
 如果生成的 overlay 违反这些协议，admission 会 fail-closed。
 
+为避免以新的 prompt 覆盖完整协议，Factorio Host 不接受对
+`systemInstructionTemplate` 的 overlay 修改；修改 `protocolRules` 时必须逐字保留
+first-reset 和 no-import 两条不可变规则，其余规则可以扩展。
+
 ## 提取器摘要（Extractor Digest）
 
 当前 Factorio 提取器摘要：
