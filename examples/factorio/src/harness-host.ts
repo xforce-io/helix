@@ -16,6 +16,7 @@ import {
   durableStoreSnapshotPath,
   freezeAvailableCatalogRefs,
   materializeHarnessRecord,
+  replayFromRecordedPins,
   renderControlPlane,
   selectValidateResolveFreeze,
   type CatalogCardRef,
@@ -250,6 +251,20 @@ export function formFactorioAvailableCatalogRefs(
       : 'helix.runtime.recursive-model/v1'
   return freezeAvailableCatalogRefs(resolveCapabilitySet(setId))
 }
+
+/** Parse the complete immutable ref syntax accepted by the Factorio CLI. */
+export function parseHarnessStateRef(value: string): HarnessStateRef {
+  const match = /^(baseline|overlay):(.+)@(\d+)#([0-9a-f]{64})$/.exec(value)
+  if (match === null) {
+    throw new Error('overlay/baseline ref must be kind:id@revision#64-lowercase-hex-hash')
+  }
+  return {
+    kind: match[1] as 'baseline' | 'overlay',
+    id: match[2]!,
+    revision: Number(match[3]),
+    contentHash: match[4]!,
+  }
+}
 export type AssembledFactorioRun = {
   freeze: FreezeResult
   frozen: FrozenHarnessSlice
@@ -289,10 +304,36 @@ export function assembleFactorioRun(input: {
       ...(input.overlayRef !== undefined ? { overlayRef: input.overlayRef } : {}),
     },
   })
+  return assembleFrozenFactorioRun(input.basePins, freeze)
+}
+
+/**
+ * Reconstruct a new Factorio run from the exact frozen pins issued to an
+ * evaluator. This deliberately skips the external-overlay admission route:
+ * evaluator admission was already checked before these pins were produced.
+ */
+export function assembleFactorioRunFromFrozenPins(input: {
+  bundle: FactorioHostBundle
+  basePins: RunPins
+  harnessPins: HarnessPinsV1
+}): AssembledFactorioRun {
+  const availableCatalogRefs = formFactorioAvailableCatalogRefs(input.basePins.harness)
+  const freeze = replayFromRecordedPins({
+    store: input.bundle.store,
+    pins: input.harnessPins,
+    availableCatalogRefs,
+  })
+  return assembleFrozenFactorioRun(input.basePins, freeze)
+}
+
+function assembleFrozenFactorioRun(
+  basePins: RunPins,
+  freeze: FreezeResult,
+): AssembledFactorioRun {
   const adapter = createFactorioScenarioAdapter()
   const scenario = adapter.buildScenarioPayload({
     frozen: freeze.frozen,
-    codeProtocolPin,
+    codeProtocolPin: basePins.harness,
   })
   const catalogDocs = freeze.frozen.catalogCards.map((ref) => ({
     ref,
@@ -308,7 +349,7 @@ export function assembleFactorioRun(input: {
     controlPlaneText,
   )
   const pins: RunPins = {
-    ...input.basePins,
+    ...basePins,
     harnessState: freeze.pins,
   }
   const record = materializeHarnessRecord(freeze)

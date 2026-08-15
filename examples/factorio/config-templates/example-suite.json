@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "helix.refinement-suite/v1",
+  "cases": [
+    {
+      "caseId": "holdout-1",
+      "inputRef": "factorio-holdout-task-1",
+      "seed": 42,
+      "weight": 1.0
+    },
+    {
+      "caseId": "holdout-2",
+      "inputRef": "factorio-holdout-task-2",
+      "seed": 43,
+      "weight": 1.0
+    }
+  ]
+}

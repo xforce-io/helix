@@ -375,7 +375,7 @@ function recordForModel(record: CellExecutionRecord): Record<string, unknown> {
 }
 
 function renderEnvelope(envelope: Record<string, unknown>): string {
-  return `## Helix ContextEnvelope\n\nThe JSON block is the canonical model-visible state for this decision.\n\n\`\`\`json\n${JSON.stringify(envelope, null, 2)}\n\`\`\``
+  return `## Helix ContextEnvelope\n\nThe JSON block is the canonical model-visible state for this decision.\n\n\`\`\`json\n${canonicalJson(envelope)}\n\`\`\``
 }
 
 function textMessage(role: 'user' | 'assistant', text: string): Message {

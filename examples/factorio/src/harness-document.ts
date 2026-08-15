@@ -34,6 +34,7 @@ Use execute_cell for action, not prose. Never ask the harness to provide a solut
       'Create an automatic iron-ore factory that produces at least 16 iron-ore per 60 in-game seconds.',
     protocolRules: [
       'First environment effect must call factorio.reset() exactly once.',
+      'Never use import statements in outer cells or Factorio action strings.',
       'At most one external effect per cell.',
       'Only call Factorio action APIs listed in actionCapabilities after reset.',
       'Do not claim success; only the environment verifier decides.',

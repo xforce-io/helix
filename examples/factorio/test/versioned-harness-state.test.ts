@@ -1539,6 +1539,11 @@ test('review.readLiveEvidence-strict-json-rejects-duplicate-keys', () => {
     () => parseLiveEvidenceText('{"schema":"helix.factorio.live/v3","n":01}'),
     'HARNESS_JSON_INVALID',
   )
+
+  assert.equal(
+    (parseLiveEvidenceText('{"schema":"helix.factorio.live/v3","position":-1.5}') as { position: number }).position,
+    -1.5,
+  )
 })
 
 test('review.replay-rejects-evidence-pins-outer-code-pin-inconsistency', () => {

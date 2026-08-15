@@ -4,10 +4,10 @@ import path from 'node:path'
 import { FileTraceObjectStore, type TaskOutcomeFinalization } from 'milkie'
 import {
   HarnessError,
-  parseHarnessJsonText,
   type JsonTextValue,
 } from '../../../src/harness/index.js'
 import { canonicalJson } from './canonical.js'
+import { parseFactorioEvidenceJsonText } from './evidence-json.js'
 import type {
   FinalizationSummary,
   LiveEvidence,
@@ -204,7 +204,7 @@ export async function readLiveEvidence(runId: string): Promise<LiveEvidence> {
 export function parseLiveEvidenceText(text: string): LiveEvidence {
   let value: JsonTextValue
   try {
-    value = parseHarnessJsonText(text).value
+    value = parseFactorioEvidenceJsonText(text)
   } catch (error) {
     if (error instanceof HarnessError) throw error
     throw new HarnessError(

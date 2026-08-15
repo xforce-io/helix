@@ -109,13 +109,19 @@ npm run verify:factorio:replay -- --run <runId>
 
 ## P3 — recorded run → overlay → 下一轮 live
 
-P3 把 #13 refinement CLI 接到本 example 的 RCS Host。generation/evaluation 的尺子是 `task_verification` 派生指标（`FACTORIO_EXTRACTOR_DIGEST`），不是 fixture 常数。无 Docker 时以 `examples/factorio/test/refinement-host.test.ts` 为可判定契约，缺环境不算通过。
+P3 把 #13 refinement CLI 接到本 example 的耐久 RCS Host：根目录固定为
+`artifacts/factorio/harness-state`，与下一轮 `live --overlay` 共用。generation 使用
+P1 的 `AnthropicAdapter` + `DefaultIOPort`，其模型严格取 `ANTHROPIC_MODEL`；非法或未
+终结的 recorded P1 在调用模型前 fail-closed。evaluation 的两臂从 evaluator 已冻结的 pins
+执行真实 FLE，并分别写入 `artifacts/factorio/evals/<reserved-run-ref>/live.json`；它们不会
+通过外部 `live --overlay` 路由运行未 promote 候选。
 
 ```bash
 # 1. 已有终结的 P1 recorded run（artifacts/factorio/runs/<runId>/live.json）
 
-# 2. 用 Factorio Host 走 propose → evaluate → request → manual promote
-#    （assertion / policy / suite 由 Host 与 HRCA 夹具提供；见 docs/refinement.md）
+# 2. 先以可信 HRCA 发布 policy/suite（可重复 fixture 在 refinement/；生产使用 IdP/mTLS）
+#    再由人类 scoped assertion 走 propose → evaluate → request → manual promote。
+#    模型没有 assertion、mint 或 promote 权限；autoGrantKeys 固定为空。
 npm run factorio:refine -- refine propose --host-module examples/factorio/src/refinement-host.ts \
   --assertion assertion.json --proposal-id p3-1 \
   --source-runs <runId> --baseline <baselineRef> --policy <policyRef>
@@ -129,12 +135,18 @@ npm run factorio:refine -- refine request --host-module examples/factorio/src/re
 npm run factorio:refine -- refine promote --manual --host-module examples/factorio/src/refinement-host.ts \
   --assertion assertion.json --request <requestRef> --policy <policyRef>
 
-# 3. 下一轮 live 显式选择已 promote overlay；旧 run replay 仍用当时 pins
+# 3. 下一轮 live 显式选择已 promote overlay；旧 run replay 仍用当时 pins。
+#    start 仅供真实 FLE 两臂和下一轮 live 使用，fixture smoke / npm test 不启动 cluster。
+npm run factorio:cluster:start
 npm run verify:factorio:live -- --overlay overlay:<id>@0#<hash>
 npm run verify:factorio:replay -- --run <oldRunId>
+npm run factorio:cluster:stop
 ```
 
-`createRefinementCommandHost` 导出在 `examples/factorio/src/refinement-host.ts`。两臂 FLE 真跑需要集群；契约测试覆盖投影 fail-closed、outcome 抽取、reserved overlay 拒绝与 promotion 后选择。
+`createRefinementCommandHost` 导出在 `examples/factorio/src/refinement-host.ts`。无 Docker / 模型
+时，`examples/factorio/test/refinement-host.test.ts` 覆盖 HMAC 人工 assertion、投影
+fail-closed、两条 recorded arm、reserved overlay 拒绝、promotion 后选择和 replay 稳定性；这不
+替代真实 FLE 环境验收。
 
 ## 布局
 
