@@ -81,6 +81,7 @@ function createSystemScenarioAdapter(options: {
   baselineSystemInstruction: string
   taskNarrative: string
   codeProtocolPin: string
+  failVerification?: boolean
 }) {
   const base = createFixtureScenarioAdapter({
     scenarioId: 'system.e2e.scenario',
@@ -104,8 +105,10 @@ function createSystemScenarioAdapter(options: {
       const catalogBonus = Math.min(output.catalogCardCount * 0.15, 0.3) // Up to 2 cards
 
       return {
-        success: true,
-        quality: Math.min(baseQuality + overlayBonus + catalogBonus, 1.0),
+        success: options.failVerification !== true,
+        quality: options.failVerification === true
+          ? 0
+          : Math.min(baseQuality + overlayBonus + catalogBonus, 1.0),
       }
     },
     metrics: (output: {
@@ -161,6 +164,10 @@ export function createSystemCommandHost(options: {
   rootDir?: string
   artifactsDir: string
   runId: string
+  /** Test-only invalid payload injection for candidate admission failures. */
+  generationPayloadText?: string
+  /** Test-only candidate verifier failure after normal freeze/replay. */
+  candidateVerificationFails?: boolean
 }): RefinementCommandHost {
   // Verify production catalog is loaded
   const productionCards = listProductionCards()
@@ -194,7 +201,7 @@ export function createSystemCommandHost(options: {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({
+            text: options.generationPayloadText ?? JSON.stringify({
               schemaVersion: 'helix.harness-overlay/v1',
               baseBaselineRef: base,
               changes: { systemInstructionTemplate: 'system candidate instruction from IOPort' },
@@ -280,6 +287,7 @@ export function createSystemCommandHost(options: {
         baselineSystemInstruction,
         taskNarrative: freeze.frozen.document.control.taskNarrativeTemplate,
         codeProtocolPin,
+        failVerification: input.arm === 'candidate' && options.candidateVerificationFails === true,
       })
 
       // Build scenario payload using frozen harness

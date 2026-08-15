@@ -58,6 +58,14 @@ S3 negative tests:
 - **Model cannot publish-suite**: model/skill issuer rejected
 - **Unsigned assertion cannot mint**: tampered signature rejected
 
+### `system-outcomes.e2e.test.ts` (NEW)
+
+S2/S4 failure classifications:
+
+- **candidate_rejected**: invalid IOPort payload is rejected before an overlay is published
+- **evaluation_failed**: a verifier-failed candidate cannot create a promotion request or enter `external`
+- Each failure writes a durable `report.json`; evaluation failures retain per-arm evidence paths
+
 ### `system-command-host.ts`
 
 系统级 RefinementCommandHost：
