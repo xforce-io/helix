@@ -73,7 +73,7 @@ Requires Node.js 20 or newer.
 
 ```bash
 npm install
-npm test          # runs check + unit tests + system e2e
+npm test          # runs check + unit tests
 npm run build
 ```
 
@@ -93,16 +93,16 @@ loop in a **deterministic, credential-free** manner:
 6. **Evolution**: unpromoted overlay fails on `external` route; promoted overlay
    succeeds on next-run selection; old replay hash unchanged after promotion.
 
-The test is included in `npm test` and runs as part of the default CI gate. To
-run only the e2e suite:
+The fixture E2E is deliberately excluded from `npm test`: E2E scope can grow
+to include external environments and real-model cost. Run it explicitly:
 
 ```bash
-npm run test:e2e
+npm run test:e2e:fixture
+# `npm run test:e2e` remains a compatibility alias.
 ```
 
-A live-LLM gate (`HELIX_E2E_LIVE=1`) is reserved for future integration but
-explicitly skips if credentials are missing; it does **not** run in default
-`npm test`.
+A future live-LLM suite will be a separate manual or scheduled CI job; it will
+never be part of default `npm test`.
 
 ### Factorio example
 

@@ -95,10 +95,13 @@ S2/S4 failure classifications:
 ## 运行测试
 
 ```bash
-# 运行完整测试套件（包括 e2e）
+# 默认确定性测试（不含 E2E）
 npm test
 
-# 仅运行系统 e2e
+# 手动运行 fixture system E2E
+npm run test:e2e:fixture
+
+# 兼容旧入口
 npm run test:e2e
 ```
 
@@ -134,11 +137,12 @@ cat artifacts/system-e2e/<runId>/*/evidence.json
 Live LLM integration **not implemented** in this version:
 
 ```bash
-# Test always skips (whether or not creds exist)
-HELIX_E2E_LIVE=1 npm run test:e2e
+# 当前 fixture suite 中的 live gate 会显式 skip；真实 live suite 尚未实现。
+HELIX_E2E_LIVE=1 npm run test:e2e:fixture
 ```
 
-**Note**: live LLM 测试不在默认 `npm test` 中运行。
+真实 live LLM suite 将作为独立的手动或定时 CI job 加入，绝不进入默认
+`npm test`；届时会有专门的 `test:e2e:live` 入口。
 
 ## 范围外
 
