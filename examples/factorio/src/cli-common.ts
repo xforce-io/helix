@@ -4,10 +4,10 @@ import path from 'node:path'
 import { FileTraceObjectStore, type TaskOutcomeFinalization } from 'milkie'
 import {
   HarnessError,
-  parseHarnessJsonText,
   type JsonTextValue,
 } from '../../../src/harness/index.js'
 import { canonicalJson } from './canonical.js'
+import { parseFactorioEvidenceJsonText } from './evidence-json.js'
 import type {
   FinalizationSummary,
   LiveEvidence,
@@ -204,11 +204,7 @@ export async function readLiveEvidence(runId: string): Promise<LiveEvidence> {
 export function parseLiveEvidenceText(text: string): LiveEvidence {
   let value: JsonTextValue
   try {
-    // Live evidence contains FLE observations (for example negative world
-    // coordinates and fractional metrics), so it is not itself a Harness
-    // document. Keep the duplicate-key/text gate while accepting legal JSON
-    // numeric values in the evidence envelope.
-    value = parseHarnessJsonText(text, { allowStandardJsonNumbers: true }).value
+    value = parseFactorioEvidenceJsonText(text)
   } catch (error) {
     if (error instanceof HarnessError) throw error
     throw new HarnessError(

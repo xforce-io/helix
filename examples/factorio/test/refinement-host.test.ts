@@ -16,6 +16,7 @@ import {
   createFactorioFixtureAssertion,
   EXAMPLE_BUNDLE,
   extractFactorioEvaluationMetrics,
+  factorioArmMetrics,
   FACTORIO_EXTRACTOR_DIGEST,
   parseHarnessStateRef,
   parseRecordedFactorioLiveEvidence,
@@ -78,7 +79,7 @@ const policy = {
   schemaVersion: 'helix.refinement-policy/v1' as const,
   generation: { model: 'fixture-recorded-model', maxOutputTokens: 64 },
   extractorDigest: FACTORIO_EXTRACTOR_DIGEST,
-  gate: { minQualityDelta: 0, maxCostRatio: 2, maxLatencyRatio: 2, maxFailureRateDelta: 1 },
+  gate: { minQualityDelta: 0.1, maxCostRatio: 2, maxLatencyRatio: 2, maxFailureRateDelta: 0 },
   authority: { manualApprovers: ['factorio-fixture-researcher'] },
 }
 
@@ -232,14 +233,47 @@ test('P3 invalid recorded input fails closed before any generation IOPort call',
 })
 
 test('P3 fixture assertion is human-scoped and does not grant auto-promotion', () => {
+  const now = new Date('2030-01-01T00:00:00Z')
   const assertion = createFactorioFixtureAssertion({
     operation: 'refine.promote.manual',
     nonce: 'fixture-human-promotion',
+    now,
   })
   assert.equal(assertion.subject, 'factorio-fixture-researcher')
   assert.equal(assertion.operation, 'refine.promote.manual')
   assert.equal(EXAMPLE_BUNDLE.autoGrantKeys.length, 0)
   assert.equal(EXAMPLE_BUNDLE.assertionKeys.length, 1)
+  assert.ok(Date.parse(assertion.issuedAt) < now.getTime())
+  assert.ok(Date.parse(assertion.expiresAt) > now.getTime())
+})
+
+test('P3 Factorio Host rejects a policy whose model pin differs from the live model', async () => {
+  const bundle = createFactorioHostBundle()
+  const host = fixtureHost(bundle)
+  const workflow = new RefinementWorkflow(host.rcs, host.adapter)
+  const policyRef = publishFactorioFixtureConfiguration(workflow, 'wrong-model', 'policy', {
+    ...policy,
+    generation: { ...policy.generation, model: 'another-model' },
+  })
+  await assert.rejects(
+    workflow.propose({
+      proposalId: 'wrong-model',
+      sourceRunRefs: ['recorded-p1'],
+      baselineRef: bundle.defaultBaselineRef,
+      policyRef,
+    }),
+    /policy model must equal ANTHROPIC_MODEL/,
+  )
+})
+
+test('P3 failed candidate cannot produce a promotable Factorio evaluation metric', () => {
+  const failed = recordedLive('candidate-failed', false)
+  assert.equal(factorioArmMetrics('baseline', failed).quality, 0)
+  assert.throws(
+    () => factorioArmMetrics('candidate', failed),
+    /candidate FLE verification must succeed/,
+  )
+  assert.equal(factorioArmMetrics('candidate', recordedLive('candidate-passed', true)).quality, 1)
 })
 
 test('P3 fixture E2E: recorded P1 → propose → two arms → request → human promotion → next overlay', async () => {

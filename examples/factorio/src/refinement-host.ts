@@ -175,7 +175,7 @@ export function createFactorioRefinementCommandHost(options: {
   }
   const innerPort = options.innerPort ?? createFactorioGenerationPort()
   const runArm = options.runArm ?? createLiveFactorioRunArm(bundle, generationModel)
-  const adapter = createMilkieRefinementAdapter({
+  const baseAdapter = createMilkieRefinementAdapter({
     rcs,
     availableCatalogRefs: formFactorioAvailableCatalogRefs('factorio-rlm/v4'),
     codeProtocolPin: 'factorio-rlm/v4',
@@ -192,6 +192,19 @@ export function createFactorioRefinementCommandHost(options: {
     sharedPins: { runner: 'factorio', model: generationModel },
     runArm,
   })
+  const adapter: RefinementCommandHost['adapter'] = {
+    ...baseAdapter,
+    async generate(input) {
+      // A signed policy is candidate provenance. Do not allow it to claim a
+      // model different from the one the Factorio Host will actually call.
+      if (input.policy.generation.model !== generationModel) {
+        throw new Error(
+          `Factorio refinement policy model must equal ANTHROPIC_MODEL (${generationModel})`,
+        )
+      }
+      return baseAdapter.generate(input)
+    },
+  }
   return {
     rcs,
     adapter,
@@ -204,7 +217,12 @@ export function createFactorioFixtureAssertion(input: {
   operation: ActorAssertionV1['operation']
   nonce: string
   subject?: string
+  /** Test injection only; real assertions come from an external IdP. */
+  now?: Date
 }): ActorAssertionV1 {
+  const now = input.now ?? new Date()
+  const issuedAt = new Date(now.getTime() - 1_000)
+  const expiresAt = new Date(now.getTime() + 60 * 60 * 1_000)
   return signActorAssertion({
     schemaVersion: 'helix.refinement-actor-assertion/v1',
     subject: input.subject ?? 'factorio-fixture-researcher',
@@ -212,8 +230,8 @@ export function createFactorioFixtureAssertion(input: {
     keyId: FACTORIO_REFINEMENT_FIXTURE.assertionKeyId,
     audience: FACTORIO_REFINEMENT_FIXTURE.audience,
     operation: input.operation,
-    issuedAt: '2026-08-14T00:00:00Z',
-    expiresAt: '2026-08-15T00:00:00Z',
+    issuedAt: issuedAt.toISOString(),
+    expiresAt: expiresAt.toISOString(),
     nonce: input.nonce,
   }, FACTORIO_REFINEMENT_FIXTURE.assertionSecret)
 }
@@ -227,11 +245,22 @@ function createFactorioGenerationPort(): IIOPort {
   }))
 }
 
+/** A failed candidate may be inspected, but can never reach promotion. */
+export function factorioArmMetrics(
+  arm: 'baseline' | 'candidate',
+  live: LiveEvidence,
+): ReturnType<typeof extractFactorioEvaluationMetrics> {
+  if (arm === 'candidate' && !live.finalProjection.verification.success) {
+    throw new Error('Factorio candidate FLE verification must succeed before promotion')
+  }
+  return extractFactorioEvaluationMetrics(live)
+}
+
 function createLiveFactorioRunArm(
   bundle: FactorioHostBundle | undefined,
   model: string,
 ): FactorioRunArm {
-  return async ({ reservedRunRef, pins: harnessPins }) => {
+  return async ({ arm, reservedRunRef, pins: harnessPins }) => {
     if (bundle === undefined) {
       throw new Error('live Factorio evaluation requires a Host-created RCS bundle')
     }
@@ -252,7 +281,7 @@ function createLiveFactorioRunArm(
     })
     return {
       runRef: reservedRunRef,
-      ...extractFactorioEvaluationMetrics(result.evidence),
+      ...factorioArmMetrics(arm, result.evidence),
     }
   }
 }
