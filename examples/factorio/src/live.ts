@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   AnthropicAdapter,
   FileTaskOutcomeFinalizationStore,
@@ -32,9 +33,10 @@ import {
 } from './cli-common.js'
 import {
   assembleFactorioRun,
+  type AssembledFactorioRun,
   createFactorioHostBundle,
+  parseHarnessStateRef,
 } from './harness-host.js'
-import { parseHarnessStateRef } from './refinement-host.js'
 
 import { runHarness } from './harness.js'
 import { LiveCellExecutor, type ChildPortHandle } from './live-executor.js'
@@ -78,32 +80,45 @@ function completionStatus(
   return 'error'
 }
 
-async function main(): Promise<void> {
-  preflightLive()
-  const model = requireModel()
-  const runId = `factorio-${Date.now()}-${randomUUID().slice(0, 8)}`
+/** Milkie caps finalization IDs at 128 characters; evaluator run refs are longer. */
+export function factorioFinalizationId(runId: string): string {
+  const suffix = ':eval:fle:v2'
+  const direct = `${runId}${suffix}`
+  if (direct.length <= 128) return direct
+  return `factorio-eval-${createHash('sha256').update(runId).digest('hex')}`
+}
+
+export type RunAssembledFactorioLiveInput = {
+  /** Fully selected/frozen harness; evaluator arms must pass their issued pins. */
+  assembled: AssembledFactorioRun
+  model: string
+  runId: string
+  /** Evaluation arms persist separately from normal P1 recorded runs. */
+  evidencePath?: string
+}
+
+export type RunAssembledFactorioLiveResult = {
+  evidence: LiveEvidence
+  evidencePath: string
+}
+
+/**
+ * Execute one real FLE run from already assembled pins. Both normal P1 and
+ * refinement evaluation arms share this path; only the caller decides where
+ * the immutable evidence is written.
+ */
+export async function runAssembledFactorioLive(
+  input: RunAssembledFactorioLiveInput,
+): Promise<RunAssembledFactorioLiveResult> {
+  const { assembled, model, runId } = input
   const episodeId = `${runId}:episode:0`
   const budget = { deadlineAt: Date.now() + LIVE_WALL_TIMEOUT_MS }
   const controller = new AbortController()
   const cancel = () => controller.abort()
   process.once('SIGINT', cancel)
   process.once('SIGTERM', cancel)
-  const sessionAsyncEnabled =
-    process.env['HELIX_SESSION_ASYNC'] === '1' ||
-    process.env['HELIX_SESSION_ASYNC'] === 'true' ||
-    process.env['HELIX_SESSION_ASYNC'] === 'yes'
-  const basePins = sessionAsyncEnabled ? pinsSessionAsync(model) : pins(model)
-  const hostBundle = createFactorioHostBundle({ rootDir: HARNESS_STATE_ROOT })
-  const overlayArg = argument('--overlay')
-  const assembled = assembleFactorioRun({
-    bundle: hostBundle,
-    basePins,
-    baselineRef: sessionAsyncEnabled
-      ? hostBundle.legacyV5BaselineRef
-      : hostBundle.defaultBaselineRef,
-    ...(overlayArg === undefined ? {} : { overlayRef: parseHarnessStateRef(overlayArg) }),
-  })
   const runPins = assembled.pins
+  const sessionAsyncEnabled = runPins.sessionAsyncVersion === '1'
 
   const traceStore = new JsonlEventStore(TRACE_ROOT)
   const objects = objectStore()
@@ -390,7 +405,7 @@ async function main(): Promise<void> {
   const finalizationAttempt = await milkie.finalizeTaskOutcome({
     runId,
     expectedState: 'unfinalized',
-    finalizationId: `${runId}:eval:fle:v2`,
+    finalizationId: factorioFinalizationId(runId),
     value: outcomeValue,
     verifierClaim: { type: 'eval', id: 'helix.factorio.fle/v2' },
     evidence: [
@@ -470,39 +485,64 @@ async function main(): Promise<void> {
     checks,
   }
   const evidence = await attachEvidenceRef(objects, evidenceCore)
-  const output = await writeEvidence(runId, 'live', evidence, argument('--evidence'))
-  console.log(
-    JSON.stringify(
-      {
-        schema: evidence.schema,
-        verdict: evidence.verdict,
-        runId: evidence.runId,
-        pins: evidence.pins,
-        budget: evidence.budget,
-        projectionDigest: evidence.projectionDigest,
-        termination: evidence.termination,
-        childRunIds: evidence.childRunIds,
-        recursiveModel: evidence.recursiveModel,
-        recursiveResultWitness: evidence.recursiveResultWitness,
-        finalization: evidence.finalization,
-        checks: evidence.checks,
-        evidenceRef: evidence.evidenceRef,
-      },
-      null,
-      2,
-    ),
-  )
+  const evidencePath = await writeEvidence(runId, 'live', evidence, input.evidencePath)
+  return { evidence, evidencePath }
+}
+
+async function main(): Promise<void> {
+  preflightLive()
+  const model = requireModel()
+  const runId = `factorio-${Date.now()}-${randomUUID().slice(0, 8)}`
+  const sessionAsyncEnabled =
+    process.env['HELIX_SESSION_ASYNC'] === '1' ||
+    process.env['HELIX_SESSION_ASYNC'] === 'true' ||
+    process.env['HELIX_SESSION_ASYNC'] === 'yes'
+  const basePins = sessionAsyncEnabled ? pinsSessionAsync(model) : pins(model)
+  const hostBundle = createFactorioHostBundle({ rootDir: HARNESS_STATE_ROOT })
+  const overlayArg = argument('--overlay')
+  const assembled = assembleFactorioRun({
+    bundle: hostBundle,
+    basePins,
+    baselineRef: sessionAsyncEnabled
+      ? hostBundle.legacyV5BaselineRef
+      : hostBundle.defaultBaselineRef,
+    ...(overlayArg === undefined ? {} : { overlayRef: parseHarnessStateRef(overlayArg) }),
+  })
+  const explicitEvidencePath = argument('--evidence')
+  const { evidence, evidencePath } = await runAssembledFactorioLive({
+    assembled,
+    model,
+    runId,
+    ...(explicitEvidencePath === undefined ? {} : { evidencePath: explicitEvidencePath }),
+  })
+  console.log(JSON.stringify({
+    schema: evidence.schema,
+    verdict: evidence.verdict,
+    runId: evidence.runId,
+    pins: evidence.pins,
+    budget: evidence.budget,
+    projectionDigest: evidence.projectionDigest,
+    termination: evidence.termination,
+    childRunIds: evidence.childRunIds,
+    recursiveModel: evidence.recursiveModel,
+    recursiveResultWitness: evidence.recursiveResultWitness,
+    finalization: evidence.finalization,
+    checks: evidence.checks,
+    evidenceRef: evidence.evidenceRef,
+  }, null, 2))
   console.log(`runId=${runId}`)
-  console.log(`evidence=${output}`)
+  console.log(`evidence=${evidencePath}`)
   process.exitCode =
     evidence.verdict === 'pass'
       ? 0
-      : harnessResult.termination === 'cancelled'
+      : evidence.termination === 'cancelled'
         ? 130
         : 1
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.stack : String(error))
-  process.exitCode = 2
-})
+if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => {
+    console.error(error instanceof Error ? error.stack : String(error))
+    process.exitCode = 2
+  })
+}

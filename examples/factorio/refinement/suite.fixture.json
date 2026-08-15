@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "helix.refinement-suite/v1",
+  "cases": [
+    {
+      "caseId": "factorio-p3-holdout",
+      "inputRef": "factorio-recorded-p1",
+      "seed": 0,
+      "weight": 1
+    }
+  ]
+}

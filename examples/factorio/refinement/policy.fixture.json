@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "helix.refinement-policy/v1",
+  "generation": {
+    "model": "fixture-recorded-model",
+    "maxOutputTokens": 64
+  },
+  "extractorDigest": "c9aef044fa6c05f6a6901530d6082d9853919c3b69e9411d54a32558216d8c45",
+  "gate": {
+    "minQualityDelta": 0,
+    "maxCostRatio": 2,
+    "maxLatencyRatio": 2,
+    "maxFailureRateDelta": 1
+  },
+  "authority": {
+    "manualApprovers": ["factorio-fixture-researcher"]
+  }
+}

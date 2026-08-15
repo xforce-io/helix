@@ -33,13 +33,23 @@ function isDigit(ch: string): boolean {
   return ch >= '0' && ch <= '9'
 }
 
+type JsonTextParseOptions = {
+  /**
+   * Harness documents only admit canonical non-negative safe integers. Recorded
+   * runtime evidence may legitimately contain signed/fractional observations.
+   */
+  allowStandardJsonNumbers?: boolean
+}
+
 class JsonTextScanner {
   readonly source: string
   private i = 0
+  private readonly allowStandardJsonNumbers: boolean
 
-  constructor(source: string) {
+  constructor(source: string, options: JsonTextParseOptions = {}) {
     // Strip a single leading UTF-8 BOM if present; output canonical never emits BOM.
     this.source = source.charCodeAt(0) === 0xfeff ? source.slice(1) : source
+    this.allowStandardJsonNumbers = options.allowStandardJsonNumbers === true
   }
 
   parse(): JsonTextValue {
@@ -326,6 +336,9 @@ class JsonTextScanner {
    * `0` or `[1-9][0-9]*`. Reject `01`, `1.0`, `1e0`, `-0`, negatives, floats.
    */
   private parseNumber(): number {
+    if (this.allowStandardJsonNumbers) {
+      return this.parseStandardJsonNumber()
+    }
     const start = this.i
     if (this.peek() === '-') {
       // Negative numbers are never valid for harness numeric fields; reject at
@@ -404,17 +417,58 @@ class JsonTextScanner {
     }
     return value
   }
+
+  /** Parse a JSON number without weakening object-key duplicate detection. */
+  private parseStandardJsonNumber(): number {
+    const start = this.i
+    if (this.peek() === '-') this.advance()
+    if (this.peek() === '0') {
+      this.advance()
+      if (isDigit(this.peek())) {
+        throw harnessError('HARNESS_JSON_INVALID', 'leading zero in numeric token', { at: this.i })
+      }
+    } else {
+      if (!isDigit(this.peek())) {
+        throw harnessError('HARNESS_JSON_INVALID', 'invalid numeric token', { at: this.i })
+      }
+      while (isDigit(this.peek())) this.advance()
+    }
+    if (this.peek() === '.') {
+      this.advance()
+      if (!isDigit(this.peek())) {
+        throw harnessError('HARNESS_JSON_INVALID', 'fraction must contain a digit', { at: this.i })
+      }
+      while (isDigit(this.peek())) this.advance()
+    }
+    if (this.peek() === 'e' || this.peek() === 'E') {
+      this.advance()
+      if (this.peek() === '+' || this.peek() === '-') this.advance()
+      if (!isDigit(this.peek())) {
+        throw harnessError('HARNESS_JSON_INVALID', 'exponent must contain a digit', { at: this.i })
+      }
+      while (isDigit(this.peek())) this.advance()
+    }
+    const token = this.source.slice(start, this.i)
+    const value = Number(token)
+    if (!Number.isFinite(value)) {
+      throw harnessError('HARNESS_JSON_INVALID', 'numeric token must be finite', { token })
+    }
+    return value
+  }
 }
 
 /**
  * Parse harness JSON text. Rejects duplicate keys and non-canonical numbers
  * before any consumer schema validation.
  */
-export function parseHarnessJsonText(text: string): ParsedJsonText {
+export function parseHarnessJsonText(
+  text: string,
+  options: JsonTextParseOptions = {},
+): ParsedJsonText {
   if (typeof text !== 'string') {
     throw harnessError('HARNESS_JSON_INVALID', 'JSON text must be a string')
   }
-  const scanner = new JsonTextScanner(text)
+  const scanner = new JsonTextScanner(text, options)
   const value = scanner.parse()
   return { value, source: scanner.source }
 }

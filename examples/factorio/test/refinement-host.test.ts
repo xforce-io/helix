@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -13,16 +13,26 @@ import {
 } from '../src/harness-host.js'
 import {
   createFactorioRefinementCommandHost,
+  createFactorioFixtureAssertion,
+  EXAMPLE_BUNDLE,
   extractFactorioEvaluationMetrics,
   FACTORIO_EXTRACTOR_DIGEST,
   parseHarnessStateRef,
+  parseRecordedFactorioLiveEvidence,
   projectFactorioGenerationInput,
 } from '../src/refinement-host.js'
 import { reconstructFactorioReplayHarness } from '../src/replay.js'
+import { factorioFinalizationId } from '../src/live.js'
 import type { LiveEvidence } from '../src/types.js'
+import type { IIOPort } from 'milkie/dist/runtime/IOPort.js'
 import { RefinementError } from '../../../src/refinement/errors.js'
+import {
+  evaluateAndWait,
+  executeRefinementCommand,
+  proposeAndWait,
+} from '../../../src/refinement/commands.js'
 import { RefinementWorkflow } from '../../../src/refinement/workflow.js'
-import { signedConfiguration } from '../../../test/refinement/fixtures.js'
+import { signConfiguration } from '../../../src/refinement/trust.js'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '../../..')
 
@@ -69,12 +79,74 @@ const policy = {
   generation: { model: 'fixture-recorded-model', maxOutputTokens: 64 },
   extractorDigest: FACTORIO_EXTRACTOR_DIGEST,
   gate: { minQualityDelta: 0, maxCostRatio: 2, maxLatencyRatio: 2, maxFailureRateDelta: 1 },
-  authority: { manualApprovers: ['fixture-researcher'] },
+  authority: { manualApprovers: ['factorio-fixture-researcher'] },
 }
 
 const suite = {
   schemaVersion: 'helix.refinement-suite/v1' as const,
   cases: [{ caseId: 'holdout', inputRef: 'in', seed: 0, weight: 1 }],
+}
+
+function stubPort(overlayText: string): IIOPort {
+  return {
+    async invokeLLM() {
+      return {
+        content: [{ type: 'text', text: overlayText }],
+        toolCalls: [],
+        usage: { inputTokens: 4, outputTokens: 8 },
+      }
+    },
+    async invokeTool(_name, _input, execute) {
+      return execute(new AbortController().signal)
+    },
+    now: () => 1,
+    uuid: () => 'factorio-refinement-test',
+  }
+}
+
+function fixtureHost(bundle: ReturnType<typeof createFactorioHostBundle>) {
+  return createFactorioRefinementCommandHost({
+    rcs: bundle.rcs,
+    generationModel: 'fixture-recorded-model',
+    innerPort: stubPort(JSON.stringify({
+      schemaVersion: 'helix.harness-overlay/v1',
+      baseBaselineRef: bundle.defaultBaselineRef,
+      changes: { systemInstructionTemplate: 'refined factorio control' },
+    })),
+    readLive: runId => recordedLive(runId, false),
+    runArm: ({ arm, reservedRunRef }) => ({
+      runRef: reservedRunRef,
+      quality: arm === 'candidate' ? 1 : 0.5,
+      cost: 10,
+      latencyMs: 10,
+      failed: false,
+    }),
+  })
+}
+
+function publishFactorioFixtureConfiguration(
+  workflow: RefinementWorkflow,
+  id: string,
+  key: 'policy' | 'suite',
+  value: typeof policy | typeof suite,
+) {
+  return key === 'policy'
+    ? workflow.publishPolicy({
+        id,
+        policy: value as typeof policy,
+        issuer: 'factorio-fixture-hrca',
+        keyId: 'factorio-fixture-policy-key',
+        signature: signConfiguration(value, 'factorio-fixture-policy-secret'),
+        bundle: EXAMPLE_BUNDLE,
+      })
+    : workflow.publishSuite({
+        id,
+        suite: value as typeof suite,
+        issuer: 'factorio-fixture-hrca',
+        keyId: 'factorio-fixture-policy-key',
+        signature: signConfiguration(value, 'factorio-fixture-policy-secret'),
+        bundle: EXAMPLE_BUNDLE,
+      })
 }
 
 test('S1 live and replay Host share one RCS snapshot', () => {
@@ -90,7 +162,7 @@ test('S1 live and replay Host share one RCS snapshot', () => {
 })
 
 test('S2 Factorio exports a loadable refinement command host', () => {
-  const host = createFactorioRefinementCommandHost()
+  const host = fixtureHost(createFactorioHostBundle())
   assert.equal(typeof host.adapter.generate, 'function')
   assert.ok(host.rcs)
   assert.equal(host.trustBundle.schemaVersion, 'helix.refinement-trust-bundle/v1')
@@ -109,10 +181,115 @@ test('S2 refinement CLI loads the relocated Factorio Host', () => {
         '--host-module', path.join(REPO_ROOT, 'examples/factorio/src/refinement-host.ts'),
         '--ref', `generation-job:missing@0#${'0'.repeat(64)}`,
       ],
-      { cwd: root, encoding: 'utf8' },
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, ANTHROPIC_MODEL: 'fixture-recorded-model' },
+      },
     )
     assert.notEqual(result.status, 0)
     assert.doesNotMatch(result.stderr, /unknown file extension|Cannot find module|host module must export/)
+    assert.ok(existsSync(path.join(root, 'artifacts/factorio/harness-state/refinement-control.json')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('P3 invalid recorded input fails closed before any generation IOPort call', async () => {
+  const bundle = createFactorioHostBundle()
+  let invocations = 0
+  const host = createFactorioRefinementCommandHost({
+    rcs: bundle.rcs,
+    generationModel: 'fixture-recorded-model',
+    innerPort: {
+      ...stubPort('{}'),
+      async invokeLLM() {
+        invocations += 1
+        return { content: [], toolCalls: [] }
+      },
+    },
+    readLive: () => undefined,
+    runArm: ({ reservedRunRef }) => ({
+      runRef: reservedRunRef,
+      quality: 0,
+      cost: 0,
+      latencyMs: 0,
+      failed: true,
+    }),
+  })
+  const workflow = new RefinementWorkflow(host.rcs, host.adapter)
+  const policyRef = publishFactorioFixtureConfiguration(workflow, 'closed-policy', 'policy', policy)
+  await assert.rejects(
+    workflow.propose({
+      proposalId: 'missing-recorded-run',
+      sourceRunRefs: ['not-recorded'],
+      baselineRef: bundle.defaultBaselineRef,
+      policyRef,
+    }),
+    /recorded Factorio run is missing/,
+  )
+  assert.equal(invocations, 0)
+})
+
+test('P3 fixture assertion is human-scoped and does not grant auto-promotion', () => {
+  const assertion = createFactorioFixtureAssertion({
+    operation: 'refine.promote.manual',
+    nonce: 'fixture-human-promotion',
+  })
+  assert.equal(assertion.subject, 'factorio-fixture-researcher')
+  assert.equal(assertion.operation, 'refine.promote.manual')
+  assert.equal(EXAMPLE_BUNDLE.autoGrantKeys.length, 0)
+  assert.equal(EXAMPLE_BUNDLE.assertionKeys.length, 1)
+})
+
+test('P3 fixture E2E: recorded P1 → propose → two arms → request → human promotion → next overlay', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'helix-factorio-p3-e2e-'))
+  try {
+    const bundle = createFactorioHostBundle({ rootDir: root })
+    const host = fixtureHost(bundle)
+    const workflow = new RefinementWorkflow(host.rcs, host.adapter)
+    const policyRef = publishFactorioFixtureConfiguration(workflow, 'p3-e2e-policy', 'policy', policy)
+    const suiteRef = publishFactorioFixtureConfiguration(workflow, 'p3-e2e-suite', 'suite', suite)
+    const proposed = await proposeAndWait(host, {
+      command: 'propose',
+      assertion: createFactorioFixtureAssertion({ operation: 'refine.propose', nonce: 'p3-e2e-propose' }),
+      proposal: {
+        proposalId: 'p3-e2e',
+        sourceRunRefs: ['recorded-p1'],
+        baselineRef: bundle.defaultBaselineRef,
+        policyRef,
+      },
+    })
+    const evaluated = await evaluateAndWait(host, {
+      command: 'evaluate',
+      assertion: createFactorioFixtureAssertion({ operation: 'refine.evaluate', nonce: 'p3-e2e-evaluate' }),
+      evaluation: { candidateRef: proposed.candidateRef, policyRef, suiteRef },
+    })
+    assert.equal(evaluated.report.verdict, 'passed')
+    assert.equal(evaluated.report.cases.length, 1)
+    assert.notEqual(
+      evaluated.report.cases[0]!.baseline.runRef,
+      evaluated.report.cases[0]!.candidate.runRef,
+    )
+    const requestRef = await executeRefinementCommand(host, {
+      command: 'request',
+      assertion: createFactorioFixtureAssertion({ operation: 'refine.request', nonce: 'p3-e2e-request' }),
+      report: evaluated.report,
+    }) as typeof policyRef
+    const promoted = await executeRefinementCommand(host, {
+      command: 'promote-manual',
+      assertion: createFactorioFixtureAssertion({ operation: 'refine.promote.manual', nonce: 'p3-e2e-promote' }),
+      requestRef,
+      policyRef,
+    }) as { overlayRef: { kind: 'overlay'; id: string; revision: number; contentHash: string } }
+    const nextRun = assembleFactorioRun({
+      bundle,
+      basePins: pins('fixture-recorded-model'),
+      baselineRef: bundle.defaultBaselineRef,
+      overlayRef: promoted.overlayRef,
+    })
+    assert.equal(nextRun.pins.harnessState?.overlayRef?.contentHash, promoted.overlayRef.contentHash)
+    assert.equal(bundle.rcs.exportSnapshot().baselines.length, 3)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -122,10 +299,10 @@ test('S3 live overlay selection admits only promoted refs', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'helix-factorio-overlay-'))
   try {
     const bundle = createFactorioHostBundle({ rootDir: root })
-    const host = createFactorioRefinementCommandHost({ rcs: bundle.rcs })
+    const host = fixtureHost(bundle)
     const workflow = new RefinementWorkflow(host.rcs, host.adapter)
-    const policyRef = workflow.publishPolicy(signedConfiguration('factorio-policy', 'policy', policy))
-    const suiteRef = workflow.publishSuite(signedConfiguration('factorio-suite', 'suite', suite))
+    const policyRef = publishFactorioFixtureConfiguration(workflow, 'factorio-policy', 'policy', policy)
+    const suiteRef = publishFactorioFixtureConfiguration(workflow, 'factorio-suite', 'suite', suite)
     const ack = await workflow.propose({
       proposalId: 'factorio-proposal',
       sourceRunRefs: ['factorio-source'],
@@ -135,6 +312,10 @@ test('S3 live overlay selection admits only promoted refs', async () => {
     const candidateRef = workflow.showGenerationJob(ack.generationJobRef).candidateRef
     assert.ok(candidateRef)
     const report = await workflow.evaluate({ candidateRef, policyRef, suiteRef })
+    assert.equal(report.cases.length, 1)
+    assert.match(report.cases[0]!.baseline.runRef, /^recorded-evaluation:/)
+    assert.match(report.cases[0]!.candidate.runRef, /^recorded-evaluation:/)
+    assert.notEqual(report.cases[0]!.baseline.runRef, report.cases[0]!.candidate.runRef)
     const requestRef = workflow.request(report)
     const candidate = host.rcs.getArtifact<{ overlayRef: { kind: string; id: string; revision: number; contentHash: string } }>(
       `${candidateRef.kind}:${candidateRef.id}@${candidateRef.revision}#${candidateRef.contentHash}`,
@@ -150,7 +331,7 @@ test('S3 live overlay selection admits only promoted refs', async () => {
     )
     const promotion = workflow.manualPromote({
       requestRef,
-      subject: 'fixture-researcher',
+      subject: 'factorio-fixture-researcher',
       policyRef,
     })
     const assembled = assembleFactorioRun({
@@ -175,10 +356,10 @@ test('S4 replay after promotion still uses recorded pins hash', async () => {
       baselineRef: bundle.defaultBaselineRef,
     })
     const recordedHash = liveAssembled.frozen.harnessContentHash
-    const host = createFactorioRefinementCommandHost({ rcs: bundle.rcs })
+    const host = fixtureHost(bundle)
     const workflow = new RefinementWorkflow(host.rcs, host.adapter)
-    const policyRef = workflow.publishPolicy(signedConfiguration('replay-policy', 'policy', policy))
-    const suiteRef = workflow.publishSuite(signedConfiguration('replay-suite', 'suite', suite))
+    const policyRef = publishFactorioFixtureConfiguration(workflow, 'replay-policy', 'policy', policy)
+    const suiteRef = publishFactorioFixtureConfiguration(workflow, 'replay-suite', 'suite', suite)
     const ack = await workflow.propose({
       proposalId: 'replay-proposal',
       sourceRunRefs: ['source'],
@@ -189,7 +370,7 @@ test('S4 replay after promotion still uses recorded pins hash', async () => {
     const report = await workflow.evaluate({ candidateRef, policyRef, suiteRef })
     workflow.manualPromote({
       requestRef: workflow.request(report),
-      subject: 'fixture-researcher',
+      subject: 'factorio-fixture-researcher',
       policyRef,
     })
     const reconstructed = reconstructFactorioReplayHarness(
@@ -210,6 +391,7 @@ test('P3 projection is a bounded summary and rejects unfinished runs', () => {
   })
   assert.equal(projection.sourceRunRefs[0], 'factorio-ok')
   assert.equal(projection.outcomes[0]?.verificationSuccess, false)
+  assert.match(projection.generationInstruction, /exactly one JSON object/)
   assert.equal('cells' in projection, false)
   assert.throws(
     () => projectFactorioGenerationInput(['missing'], { readLive: () => undefined }),
@@ -220,6 +402,19 @@ test('P3 projection is a bounded summary and rejects unfinished runs', () => {
   assert.throws(
     () => projectFactorioGenerationInput(['factorio-open'], { readLive: () => unfinished }),
     /not terminal/,
+  )
+})
+
+test('P3 recorded-live parser accepts FLE coordinates while rejecting malformed projection', () => {
+  const source = recordedLive('factorio-negative-coordinate', true) as LiveEvidence & {
+    finalProjection: LiveEvidence['finalProjection'] & { cells: Array<{ observation?: { x: number } }> }
+  }
+  source.finalProjection.cells = [{ observation: { x: -12.5 } }]
+  const parsed = parseRecordedFactorioLiveEvidence(JSON.stringify(source))
+  assert.equal(parsed.finalProjection.modelCallCount, 3)
+  assert.throws(
+    () => parseRecordedFactorioLiveEvidence('{"runId":"broken"}'),
+    /projection is invalid/,
   )
 })
 
@@ -238,4 +433,12 @@ test('parseHarnessStateRef accepts a complete overlay ref', () => {
   const ref = parseHarnessStateRef(`overlay:o1@0#${'a'.repeat(64)}`)
   assert.equal(ref.kind, 'overlay')
   assert.equal(ref.id, 'o1')
+})
+
+test('P3 evaluator finalization ID is deterministic and bounded for reserved run refs', () => {
+  const runRef = `recorded-evaluation:${'a'.repeat(180)}`
+  const id = factorioFinalizationId(runRef)
+  assert.equal(id.length, 78)
+  assert.equal(id, factorioFinalizationId(runRef))
+  assert.equal(factorioFinalizationId('factorio-p1'), 'factorio-p1:eval:fle:v2')
 })

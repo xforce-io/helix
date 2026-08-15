@@ -204,7 +204,11 @@ export async function readLiveEvidence(runId: string): Promise<LiveEvidence> {
 export function parseLiveEvidenceText(text: string): LiveEvidence {
   let value: JsonTextValue
   try {
-    value = parseHarnessJsonText(text).value
+    // Live evidence contains FLE observations (for example negative world
+    // coordinates and fractional metrics), so it is not itself a Harness
+    // document. Keep the duplicate-key/text gate while accepting legal JSON
+    // numeric values in the evidence envelope.
+    value = parseHarnessJsonText(text, { allowStandardJsonNumbers: true }).value
   } catch (error) {
     if (error instanceof HarnessError) throw error
     throw new HarnessError(
