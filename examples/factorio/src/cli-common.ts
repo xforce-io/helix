@@ -25,7 +25,7 @@ export const SESSION_STORE_ROOT = path.join(ARTIFACT_ROOT, 'sessions')
 export const HARNESS_STATE_ROOT = path.join(ARTIFACT_ROOT, 'harness-state')
 export const LIVE_WALL_TIMEOUT_MS = 30 * 60 * 1_000
 export const REPLAY_WALL_TIMEOUT_MS = 5 * 60 * 1_000
-export const MILKIE_COMMIT = 'd74128cf3ac976ebd68eb1b87f340574811c6366'
+export const MILKIE_COMMIT = 'fec0ebfb99f57e04a0812fc74fd01f85e9b81b57'
 
 export {
   CHILD_REPLAY_SAFETY_WALL_MS,
@@ -53,12 +53,6 @@ export function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name)
   const value = index >= 0 ? process.argv[index + 1] : undefined
   return value && !value.startsWith('--') ? value : undefined
-}
-
-export function requireModel(): string {
-  const model = argument('--model') ?? process.env['ANTHROPIC_MODEL']
-  if (!model) throw new Error('missing --model and ANTHROPIC_MODEL')
-  return model
 }
 
 export function pins(model: string): RunPins {
@@ -109,9 +103,7 @@ export function preflightLive(
   runner: CommandRunner = defaultRunner,
   env: NodeJS.ProcessEnv = process.env,
 ): void {
-  if (!env['ANTHROPIC_AUTH_TOKEN'] && !env['ANTHROPIC_API_KEY']) {
-    throw new Error('missing ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY')
-  }
+  // Model credentials are resolved by connectModel (HELIX_LLM_*), not preflight.
   const inspected = JSON.parse(
     runner('docker', [
       'inspect',

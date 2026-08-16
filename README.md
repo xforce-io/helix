@@ -107,6 +107,6 @@ never be part of default `npm test`.
 ### Factorio example
 
 The real Factorio gate additionally requires Docker, `uv`, a configured
-Anthropic-compatible endpoint (`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
-`ANTHROPIC_MODEL`), and the commands documented in
+model connection (`HELIX_LLM_TRANSPORT`, `HELIX_LLM_PROTOCOL`, `HELIX_LLM_MODEL`,
+`HELIX_LLM_API_KEY`, optional `HELIX_LLM_BASE_URL` / `HELIX_LLM_PROVIDER`), and the commands documented in
 [`examples/factorio`](./examples/factorio/README.md).

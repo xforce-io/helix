@@ -2,10 +2,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  AnthropicAdapter,
   FileTaskOutcomeFinalizationStore,
   MemoryStore,
   Milkie,
+  type IModelGateway,
   type ITraceObjectStore,
 } from 'milkie'
 import { DefaultIOPort } from 'milkie/dist/runtime/IOPort.js'
@@ -25,12 +25,12 @@ import {
   pins,
   pinsSessionAsync,
   preflightLive,
-  requireModel,
   SESSION_STORE_ROOT,
   summarizeFinalization,
   TRACE_ROOT,
   writeEvidence,
 } from './cli-common.js'
+import { connectModel } from './model-connection.js'
 import {
   assembleFactorioRun,
   type AssembledFactorioRun,
@@ -95,6 +95,8 @@ export type RunAssembledFactorioLiveInput = {
   runId: string
   /** Evaluation arms persist separately from normal P1 recorded runs. */
   evidencePath?: string
+  /** Optional injected gateway (tests); default path uses connectModel generate. */
+  gateway?: IModelGateway
 }
 
 export type RunAssembledFactorioLiveResult = {
@@ -122,12 +124,7 @@ export async function runAssembledFactorioLive(
 
   const traceStore = new JsonlEventStore(TRACE_ROOT)
   const objects = objectStore()
-  const apiKey = process.env['ANTHROPIC_AUTH_TOKEN'] ?? process.env['ANTHROPIC_API_KEY']
-  const baseUrl = process.env['ANTHROPIC_BASE_URL']
-  const gateway = new AnthropicAdapter({
-    ...(apiKey === undefined ? {} : { apiKey }),
-    ...(baseUrl === undefined ? {} : { baseUrl }),
-  })
+  const gateway = input.gateway ?? createLiveGateway().gateway
   const basePort = new DefaultIOPort(gateway)
   const port = new RecordingIOPort(
     basePort,
@@ -489,9 +486,31 @@ export async function runAssembledFactorioLive(
   return { evidence, evidencePath }
 }
 
+/** CLI / default live path: assemble model gateway via the connection facade. */
+export function createLiveGateway(env: NodeJS.ProcessEnv = process.env): {
+  model: string
+  gateway: IModelGateway
+} {
+  const connected = connectModel({
+    purpose: 'generate',
+    config: { env },
+  })
+  if (connected.gateway === undefined) {
+    throw new Error(
+      'Factorio live requires transport=api so connectModel can return an HTTP gateway',
+    )
+  }
+  const model = connected.projection.model
+  if (model === undefined || model.length === 0) {
+    throw new Error('Factorio live connection projection is missing model')
+  }
+  return { model, gateway: connected.gateway }
+}
+
+
 async function main(): Promise<void> {
   preflightLive()
-  const model = requireModel()
+  const { model, gateway } = createLiveGateway()
   const runId = `factorio-${Date.now()}-${randomUUID().slice(0, 8)}`
   const sessionAsyncEnabled =
     process.env['HELIX_SESSION_ASYNC'] === '1' ||
@@ -513,6 +532,7 @@ async function main(): Promise<void> {
     assembled,
     model,
     runId,
+    gateway,
     ...(explicitEvidencePath === undefined ? {} : { evidencePath: explicitEvidencePath }),
   })
   console.log(JSON.stringify({
