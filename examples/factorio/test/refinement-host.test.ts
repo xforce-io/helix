@@ -185,7 +185,13 @@ test('S2 refinement CLI loads the relocated Factorio Host', () => {
       {
         cwd: root,
         encoding: 'utf8',
-        env: { ...process.env, ANTHROPIC_MODEL: 'fixture-recorded-model' },
+        env: {
+          ...process.env,
+          HELIX_LLM_TRANSPORT: 'api',
+          HELIX_LLM_PROTOCOL: 'anthropic-messages',
+          HELIX_LLM_MODEL: 'fixture-recorded-model',
+          HELIX_LLM_API_KEY: 'sk-test-fixture',
+        },
       },
     )
     assert.notEqual(result.status, 0)
@@ -262,7 +268,7 @@ test('P3 Factorio Host rejects a policy whose model pin differs from the live mo
       baselineRef: bundle.defaultBaselineRef,
       policyRef,
     }),
-    /policy model must equal ANTHROPIC_MODEL/,
+    /policy model must equal connected model/,
   )
 })
 

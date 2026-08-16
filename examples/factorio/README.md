@@ -56,9 +56,11 @@ npm run factorio:cluster:stop
 ## P1 — Agent live + replay（默认）
 
 ```bash
-export ANTHROPIC_AUTH_TOKEN='<token>'
-export ANTHROPIC_BASE_URL='<endpoint>'   # 如需要
-export ANTHROPIC_MODEL='<model-ref>'     # 或 --model
+export HELIX_LLM_TRANSPORT=api
+export HELIX_LLM_PROTOCOL=anthropic-messages   # or openai-chat-completions
+export HELIX_LLM_MODEL='<model-ref>'
+export HELIX_LLM_API_KEY='<token>'
+export HELIX_LLM_BASE_URL='<endpoint>'         # optional
 npm run factorio:cluster:start
 npm run verify:factorio:live
 npm run verify:factorio:replay -- --run <runId>
@@ -80,8 +82,10 @@ Preflight：Helix 标签容器、镜像 pin、FLE 版本、task digest、RCON。
 ## P2 — Session / async sub-agent / mailbox（opt-in）
 
 ```bash
-export ANTHROPIC_AUTH_TOKEN='<token>'
-export ANTHROPIC_MODEL='<model-ref>'
+export HELIX_LLM_TRANSPORT=api
+export HELIX_LLM_PROTOCOL=anthropic-messages
+export HELIX_LLM_MODEL='<model-ref>'
+export HELIX_LLM_API_KEY='<token>'
 export HELIX_SESSION_ASYNC=1    # 或 true / yes
 npm run factorio:cluster:start
 npm run verify:factorio:live:session
@@ -110,8 +114,8 @@ npm run verify:factorio:replay -- --run <runId>
 ## P3 — recorded run → overlay → 下一轮 live
 
 P3 把 #13 refinement CLI 接到本 example 的耐久 RCS Host：根目录固定为
-`artifacts/factorio/harness-state`，与下一轮 `live --overlay` 共用。generation 使用
-P1 的 `AnthropicAdapter` + `DefaultIOPort`，其模型严格取 `ANTHROPIC_MODEL`；非法或未
+`artifacts/factorio/harness-state`，与下一轮 `live --overlay` 共用。generation 经
+`connectModel`（`HELIX_LLM_*`）装配；模型身份取自投影 `model`。非法或未
 终结的 recorded P1 在调用模型前 fail-closed。evaluation 的两臂从 evaluator 已冻结的 pins
 执行真实 FLE，并分别写入 `artifacts/factorio/evals/<reserved-run-ref>/live.json`；它们不会
 通过外部 `live --overlay` 路由运行未 promote 候选。

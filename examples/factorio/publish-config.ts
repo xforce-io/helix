@@ -7,7 +7,7 @@
  *   tsx examples/factorio/publish-config.ts --policy policy.json
  *   tsx examples/factorio/publish-config.ts --suite suite.json
  *
- * Requires ANTHROPIC_MODEL environment variable for policy generation.model validation.
+ * Requires HELIX_LLM_* connection env so identify can resolve generation.model.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 import { signConfiguration } from '../../src/refinement/trust.js'
 import type { RefinementPolicyV1, EvaluationSuiteV1 } from '../../src/refinement/workflow.js'
 import { HARNESS_STATE_ROOT } from './src/cli-common.js'
+import { connectModel } from './src/model-connection.js'
 import { FACTORIO_REFINEMENT_FIXTURE } from './src/refinement-host.js'
 
 const REPOSITORY_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
@@ -77,7 +78,7 @@ function validatePolicy(policy: RefinementPolicyV1, expectedModel: string): void
   }
   if (policy.generation.model !== expectedModel) {
     throw new Error(
-      `policy generation.model must equal ANTHROPIC_MODEL (${expectedModel}), got ${policy.generation.model}`
+      `policy generation.model must equal connected model (${expectedModel}), got ${policy.generation.model}`
     )
   }
   if (!Number.isSafeInteger(policy.generation.maxOutputTokens) || policy.generation.maxOutputTokens <= 0) {
@@ -119,14 +120,18 @@ async function main(): Promise<void> {
   if (!policyFile && !suiteFile) {
     console.error('Usage: tsx publish-config.ts --policy <file> | --suite <file> [--id <id>]')
     console.error('Publishes signed policy or suite to artifacts/factorio/harness-state')
-    console.error('Requires ANTHROPIC_MODEL environment variable')
+    console.error('Requires HELIX_LLM_* connection environment for model identity')
     process.exitCode = 1
     return
   }
 
-  const model = process.env['ANTHROPIC_MODEL']
-  if (!model || model.length === 0) {
-    throw new Error('ANTHROPIC_MODEL environment variable is required')
+  const identified = connectModel({
+    purpose: 'identify',
+    config: { env: process.env },
+  })
+  const model = identified.projection.model
+  if (model === undefined || model.length === 0) {
+    throw new Error('connected model projection is missing model')
   }
 
   // Use fixture keys for this example (production would use real HRCA)

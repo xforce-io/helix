@@ -1,7 +1,7 @@
 {
   "schemaVersion": "helix.refinement-policy/v1",
   "generation": {
-    "model": "REPLACE_WITH_ANTHROPIC_MODEL",
+    "model": "REPLACE_WITH_HELIX_LLM_MODEL",
     "maxOutputTokens": 4096
   },
   "extractorDigest": "REPLACE_WITH_EXTRACTOR_DIGEST_64_HEX",
