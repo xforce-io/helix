@@ -90,7 +90,7 @@ test('preflight 校验精确容器身份、镜像、握手和任务固定版本'
       rconReachable: true,
     })
   }
-  preflightLive(runner, { ANTHROPIC_API_KEY: 'test-key' })
+  preflightLive(runner, {})
   assert.equal(calls.length, 2)
 
   const wrongImage: CommandRunner = file =>
@@ -98,7 +98,7 @@ test('preflight 校验精确容器身份、镜像、握手和任务固定版本'
       ? JSON.stringify({ running: true, image: 'factorio:latest', label: 'true' })
       : '{}'
   assert.throws(
-    () => preflightLive(wrongImage, { ANTHROPIC_API_KEY: 'test-key' }),
+    () => preflightLive(wrongImage, {}),
     /image mismatch/,
   )
 })

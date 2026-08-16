@@ -7,8 +7,8 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { AnthropicAdapter } from 'milkie'
 import { DefaultIOPort, type IIOPort } from 'milkie/dist/runtime/IOPort.js'
+import { connectModel, type ConnectModelResult } from './model-connection.js'
 import type { HarnessPinsV1 } from '../../../src/harness/index.js'
 import type { RefinementControlStore } from '../../../src/refinement/control-store.js'
 import type { RefinementCommandHost } from '../../../src/refinement/commands.js'
@@ -156,7 +156,7 @@ export type FactorioRunArm = (input: {
 export function createFactorioRefinementCommandHost(options: {
   rcs?: RefinementControlStore
   rootDir?: string
-  /** Unit tests inject a recorded IOPort; CLI always uses the live Anthropic port. */
+  /** Unit tests inject a recorded IOPort; CLI builds one via connectModel. */
   innerPort?: IIOPort
   generationModel?: string
   runArm?: FactorioRunArm
@@ -171,11 +171,20 @@ export function createFactorioRefinementCommandHost(options: {
   if (defaultPublished === undefined) {
     throw new Error('Factorio refinement Host requires a published baseline')
   }
-  const generationModel = options.generationModel ?? process.env['ANTHROPIC_MODEL']
+  const needsPort = options.innerPort === undefined
+  const needsModel = options.generationModel === undefined
+  const connected: ConnectModelResult | undefined =
+    needsPort || needsModel
+      ? connectModel({
+          purpose: needsPort ? 'generate' : 'identify',
+          config: { env: process.env },
+        })
+      : undefined
+  const generationModel = options.generationModel ?? connected?.projection.model
   if (generationModel === undefined || generationModel.length === 0) {
-    throw new Error('Factorio refinement Host requires ANTHROPIC_MODEL')
+    throw new Error('Factorio refinement Host requires a connected model projection')
   }
-  const innerPort = options.innerPort ?? createFactorioGenerationPort()
+  const innerPort = options.innerPort ?? createFactorioGenerationPort(connected)
   const runArm = options.runArm ?? createLiveFactorioRunArm(bundle, generationModel)
   const baseAdapter = createMilkieRefinementAdapter({
     rcs,
@@ -201,7 +210,7 @@ export function createFactorioRefinementCommandHost(options: {
       // model different from the one the Factorio Host will actually call.
       if (input.policy.generation.model !== generationModel) {
         throw new Error(
-          `Factorio refinement policy model must equal ANTHROPIC_MODEL (${generationModel})`,
+          `Factorio refinement policy model must equal connected model (${generationModel})`,
         )
       }
       const result = await baseAdapter.generate(input)
@@ -256,13 +265,21 @@ export function createFactorioFixtureAssertion(input: {
   }, FACTORIO_REFINEMENT_FIXTURE.assertionSecret)
 }
 
-function createFactorioGenerationPort(): IIOPort {
-  const apiKey = process.env['ANTHROPIC_AUTH_TOKEN'] ?? process.env['ANTHROPIC_API_KEY']
-  const baseUrl = process.env['ANTHROPIC_BASE_URL']
-  return new DefaultIOPort(new AnthropicAdapter({
-    ...(apiKey === undefined ? {} : { apiKey }),
-    ...(baseUrl === undefined ? {} : { baseUrl }),
-  }))
+function createFactorioGenerationPort(
+  connected: ConnectModelResult | undefined,
+): IIOPort {
+  const result =
+    connected ??
+    connectModel({
+      purpose: 'generate',
+      config: { env: process.env },
+    })
+  if (result.gateway === undefined) {
+    throw new Error(
+      'Factorio refinement generation requires transport=api so connectModel can return an HTTP gateway',
+    )
+  }
+  return new DefaultIOPort(result.gateway)
 }
 
 /** A failed candidate may be inspected, but can never reach promotion. */

@@ -4,9 +4,12 @@
 
 ## 前置条件
 
-1. 设置环境变量 `ANTHROPIC_MODEL`：
+1. 设置模型连接环境（`HELIX_LLM_*`）：
    ```bash
-   export ANTHROPIC_MODEL='claude-3-7-sonnet-20250219'
+   export HELIX_LLM_TRANSPORT=api
+   export HELIX_LLM_PROTOCOL=anthropic-messages
+   export HELIX_LLM_MODEL='claude-3-7-sonnet-20250219'
+   export HELIX_LLM_API_KEY='<token>'
    ```
 
 2. 确保 `artifacts/factorio/harness-state` 目录存在（首次运行 Host 会自动创建）
@@ -14,7 +17,7 @@
 ## 发布策略（Policy）
 
 策略定义了：
-- 生成模型（必须与 `ANTHROPIC_MODEL` 一致）
+- 生成模型（必须与连接投影 `model` / `HELIX_LLM_MODEL` 一致）
 - 最大输出 token 数
 - 评估门控阈值（质量、成本、延迟、失败率）
 - 人工审批者列表
@@ -27,7 +30,7 @@ cp examples/factorio/config-templates/example-policy.json my-policy.json
 ```
 
 编辑 `my-policy.json`：
-- 将 `"model"` 设置为 `$ANTHROPIC_MODEL` 的值
+- 将 `"model"` 设置为 `$HELIX_LLM_MODEL` 的值
 - 将 `"extractorDigest"` 设置为当前提取器的 64 字符 hex hash
   （可从 `examples/factorio/src/refinement-host.ts` 中的 `FACTORIO_EXTRACTOR_DIGEST` 获取）
 - 调整 `gate` 参数和 `manualApprovers` 列表
@@ -125,6 +128,6 @@ node --import tsx src/refinement/cli.ts propose \
 
 ## 注意事项
 
-- **模型一致性**：policy 的 `generation.model` 必须与 `ANTHROPIC_MODEL` 完全一致，否则会在运行时被拒绝
+- **模型一致性**：policy 的 `generation.model` 必须与连接投影 `model` 完全一致，否则会在运行时被拒绝
 - **不可变性**：发布的 policy 和 suite 是不可变的，修改需要发布新版本（新的 id 或 revision）
 - **签名验证**：所有配置都使用 HMAC-SHA256 签名（当前使用 fixture 密钥，生产环境应使用真实 HRCA）
