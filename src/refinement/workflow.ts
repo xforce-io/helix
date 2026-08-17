@@ -317,15 +317,13 @@ export class RefinementWorkflow {
     for (const item of suite.cases) {
       const baselineReserved = this.reserveEvaluationRun(jobRef, 'baseline', item.caseId)
       const candidateReserved = this.reserveEvaluationRun(jobRef, 'candidate', item.caseId)
-      const baseline = await this.adapter.evaluate({
-        arm: 'baseline', case: item, baselineRef: candidate.baseBaselineRef, policy, reservedRunRef: baselineReserved,
+      const baseline = await this.evaluateArmOnce({
+        jobRef, arm: 'baseline', case: item, baselineRef: candidate.baseBaselineRef, policy, reservedRunRef: baselineReserved,
       })
-      const candidateArm = await this.adapter.evaluate({
-        arm: 'candidate', case: item, baselineRef: candidate.baseBaselineRef, overlayRef: candidate.overlayRef, policy,
-        reservedRunRef: candidateReserved,
+      const candidateArm = await this.evaluateArmOnce({
+        jobRef, arm: 'candidate', case: item, baselineRef: candidate.baseBaselineRef, overlayRef: candidate.overlayRef,
+        policy, reservedRunRef: candidateReserved,
       })
-      assertRecordedEvaluationMetric(baseline, policy, baselineReserved)
-      assertRecordedEvaluationMetric(candidateArm, policy, candidateReserved)
       assertEvaluationArmPins({
         baseline, candidate: candidateArm, baselineRef: candidate.baseBaselineRef, overlayRef: candidate.overlayRef,
       })
@@ -503,6 +501,70 @@ export class RefinementWorkflow {
     return runRef
   }
 
+  /**
+   * An external evaluation arm is not safely retryable once it has started:
+   * its recorded run may already have written trace/finalization evidence. A
+   * terminal metric is therefore persisted before moving to the next arm;
+   * restarts reuse it, while a started-but-unsettled arm fails closed.
+   */
+  private async evaluateArmOnce(input: {
+    jobRef: RefinementArtifactRef
+    arm: 'baseline' | 'candidate'
+    case: EvaluationSuiteV1['cases'][number]
+    baselineRef: HarnessStateRef
+    overlayRef?: HarnessStateRef
+    policy: RefinementPolicyV1
+    reservedRunRef: string
+  }): Promise<EvaluationMetric> {
+    const id = `${input.jobRef.id}:${input.arm}:${input.case.caseId}`
+    const terminal = this.findById<EvaluationArmTerminal>('evaluation-arm-terminal', id)
+    if (terminal !== undefined) {
+      assertEvaluationArmTerminal(terminal.payload, input)
+      return terminal.payload.metric
+    }
+
+    const started = this.findById<EvaluationArmStarted>('evaluation-arm-started', id)
+    if (started !== undefined) {
+      assertEvaluationArmStarted(started.payload, {
+        jobRef: input.jobRef,
+        arm: input.arm,
+        caseId: input.case.caseId,
+        runRef: input.reservedRunRef,
+      })
+      throw refinementError(
+        'REFINEMENT_CANDIDATE_INVALID',
+        'evaluation arm started without a terminal metric and cannot be retried safely',
+      )
+    }
+
+    const startedPayload: EvaluationArmStarted = {
+      jobRef: input.jobRef,
+      arm: input.arm,
+      caseId: input.case.caseId,
+      runRef: input.reservedRunRef,
+    }
+    const startedArtifact = artifact('evaluation-arm-started', id, startedPayload)
+    if (!this.rcs.putArtifact(refKey(startedArtifact.ref), startedArtifact.payload)) {
+      throw refinementError(
+        'REFINEMENT_CANDIDATE_INVALID',
+        'evaluation arm was claimed concurrently and cannot be retried safely',
+      )
+    }
+    const metric = await this.adapter.evaluate({
+      arm: input.arm,
+      case: input.case,
+      baselineRef: input.baselineRef,
+      ...(input.overlayRef === undefined ? {} : { overlayRef: input.overlayRef }),
+      policy: input.policy,
+      reservedRunRef: input.reservedRunRef,
+    })
+    assertRecordedEvaluationMetric(metric, input.policy, input.reservedRunRef)
+    assertEvaluationMetricShape(metric)
+    const terminalPayload: EvaluationArmTerminal = { ...startedPayload, metric }
+    this.put('evaluation-arm-terminal', id, terminalPayload)
+    return metric
+  }
+
   private put<T>(kind: string, id: string, payload: T): Artifact<T> {
     const value = artifact(kind, id, payload)
     this.rcs.putArtifact(refKey(value.ref), value.payload)
@@ -527,6 +589,13 @@ export class RefinementWorkflow {
 
 type CandidatePayload = { policyRef: RefinementArtifactRef; baseBaselineRef: HarnessStateRef; overlayRef: HarnessStateRef }
 type StoredReport = { verdict: EvaluationReport['verdict'] }
+type EvaluationArmStarted = {
+  jobRef: RefinementArtifactRef
+  arm: 'baseline' | 'candidate'
+  caseId: string
+  runRef: string
+}
+type EvaluationArmTerminal = EvaluationArmStarted & { metric: EvaluationMetric }
 
 /** IOPort-only generation adapter: no provider is reachable outside milkie. */
 export function createIOPortGenerationAdapter(input: {
@@ -606,6 +675,45 @@ function assertRecordedEvaluationMetric(
     throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'evaluation metric is not bound to the reserved recorded run and policy extractor')
   }
 }
+function assertEvaluationArmStarted(
+  stored: EvaluationArmStarted,
+  expected: Pick<EvaluationArmStarted, 'jobRef' | 'arm' | 'caseId' | 'runRef'>,
+): void {
+  if (
+    !sameRef(stored.jobRef, expected.jobRef) ||
+    stored.arm !== expected.arm ||
+    stored.caseId !== expected.caseId ||
+    stored.runRef !== expected.runRef
+  ) throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'evaluation arm state does not match its reserved identity')
+}
+function assertEvaluationArmTerminal(
+  stored: EvaluationArmTerminal,
+  expected: {
+    jobRef: RefinementArtifactRef
+    arm: 'baseline' | 'candidate'
+    case: EvaluationSuiteV1['cases'][number]
+    policy: RefinementPolicyV1
+    reservedRunRef: string
+  },
+): void {
+  assertEvaluationArmStarted(stored, {
+    jobRef: expected.jobRef,
+    arm: expected.arm,
+    caseId: expected.case.caseId,
+    runRef: expected.reservedRunRef,
+  })
+  assertRecordedEvaluationMetric(stored.metric, expected.policy, expected.reservedRunRef)
+  assertEvaluationMetricShape(stored.metric)
+}
+function assertEvaluationMetricShape(metric: EvaluationMetric): void {
+  if (
+    !Number.isFinite(metric.quality) ||
+    !Number.isFinite(metric.cost) ||
+    !Number.isFinite(metric.latencyMs) ||
+    metric.cost < 0 ||
+    metric.latencyMs < 0
+  ) throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'evaluation metric is invalid')
+}
 function validateSuite(suite: EvaluationSuiteV1): void {
   if (suite.schemaVersion !== 'helix.refinement-suite/v1' || suite.cases.length === 0 || new Set(suite.cases.map(c => c.caseId)).size !== suite.cases.length) throw refinementError('REFINEMENT_CONFIGURATION_UNTRUSTED', 'suite schema is invalid')
   for (const item of suite.cases) if (!nonEmpty(item.inputRef) || !Number.isSafeInteger(item.seed) || item.seed < 0 || !Number.isFinite(item.weight) || item.weight <= 0) throw refinementError('REFINEMENT_CONFIGURATION_UNTRUSTED', 'suite case is invalid')
@@ -634,11 +742,7 @@ function assertEvaluationArmPins(input: {
     b.compatibilityDecision.documentAcceptsCodeProtocolPin !== c.compatibilityDecision.documentAcceptsCodeProtocolPin ||
     b.compatibilityDecision.catalogResolved !== c.compatibilityDecision.catalogResolved
   ) throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'evaluation arms do not use ordinary matching #10 pins')
-  for (const metric of [input.baseline, input.candidate]) {
-    if (!Number.isFinite(metric.quality) || !Number.isFinite(metric.cost) || !Number.isFinite(metric.latencyMs) || metric.cost < 0 || metric.latencyMs < 0) {
-      throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'evaluation metric is invalid')
-    }
-  }
+  for (const metric of [input.baseline, input.candidate]) assertEvaluationMetricShape(metric)
 }
 
 function ratioOk(candidate: number, baseline: number, max: number): boolean { return baseline === 0 ? candidate === 0 : candidate / baseline <= max }

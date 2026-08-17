@@ -216,6 +216,132 @@ test('S2 evaluation rejects forged ordinary #10 arm pins before report publicati
   )
 })
 
+test('S2 failed candidate metric is recorded and does not truncate the remaining suite', async () => {
+  const rcs = new RefinementControlStore()
+  const base = rcs.publishBaseline(document, { id: 'failed-candidate-base', revision: 0 })
+  const threeCases: EvaluationSuiteV1 = {
+    schemaVersion: 'helix.refinement-suite/v1',
+    cases: [
+      { caseId: 'holdout-1', inputRef: 'input:1', seed: 1, weight: 1 },
+      { caseId: 'holdout-2', inputRef: 'input:2', seed: 2, weight: 1 },
+      { caseId: 'holdout-3', inputRef: 'input:3', seed: 3, weight: 1 },
+    ],
+  }
+  let calls = 0
+  const recorded = adapter(base)
+  const original = recorded.evaluate
+  recorded.evaluate = async input => {
+    calls += 1
+    const metric = await original(input)
+    return input.arm === 'candidate' && input.case.caseId === 'holdout-2'
+      ? { ...metric, quality: 0, failed: true }
+      : metric
+  }
+  const workflow = new RefinementWorkflow(rcs, recorded)
+  const policyRef = workflow.publishPolicy(signedConfiguration('failed-candidate-policy', 'policy', policy))
+  const suiteRef = workflow.publishSuite(signedConfiguration('failed-candidate-suite', 'suite', threeCases))
+  const proposal = await proposeCandidate(workflow, { proposalId: 'failed-candidate-proposal', sourceRunRefs: ['source'], baselineRef: base, policyRef })
+
+  const report = await workflow.evaluate({ candidateRef: proposal.candidateRef, policyRef, suiteRef })
+  assert.equal(calls, 6)
+  assert.equal(report.cases.length, 3)
+  assert.equal(report.cases[1]!.candidate.quality, 0)
+  assert.equal(report.cases[1]!.candidate.failed, true)
+  assert.equal(report.verdict, 'failed')
+  assert.equal(rcs.listArtifacts().filter(entry => entry.ref.startsWith('evaluation-arm-terminal:')).length, 6)
+})
+
+test('S1 restart after a started arm fails closed without replaying completed trace identity', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'helix-evaluation-retry-'))
+  try {
+    const rcs = new RefinementControlStore({ rootDir })
+    const base = rcs.publishBaseline(document, { id: 'restart-evaluation-base', revision: 0 })
+    let firstCalls = 0
+    const interrupted = adapter(base)
+    const original = interrupted.evaluate
+    interrupted.evaluate = async input => {
+      firstCalls += 1
+      if (input.arm === 'candidate') throw new Error('simulated process interruption after live trace starts')
+      return original(input)
+    }
+    const first = new RefinementWorkflow(rcs, interrupted)
+    const policyRef = first.publishPolicy(signedConfiguration('restart-evaluation-policy', 'policy', policy))
+    const suiteRef = first.publishSuite(signedConfiguration('restart-evaluation-suite', 'suite', suite))
+    const proposal = await proposeCandidate(first, { proposalId: 'restart-evaluation-proposal', sourceRunRefs: ['source'], baselineRef: base, policyRef })
+    const ack = first.beginEvaluate({ candidateRef: proposal.candidateRef, policyRef, suiteRef })
+    await assert.rejects(first.completeEvaluationJob(ack.evaluationJobRef), /simulated process interruption/)
+    assert.equal(firstCalls, 2)
+    assert.equal(rcs.listArtifacts().filter(entry => entry.ref.startsWith('evaluation-arm-terminal:')).length, 1)
+
+    const reopened = new RefinementControlStore({ rootDir })
+    let retryCalls = 0
+    const resumed = new RefinementWorkflow(reopened, {
+      generate: async () => { throw new Error('generation is not part of evaluation recovery') },
+      evaluate: async () => {
+        retryCalls += 1
+        throw new Error('a started arm must not be replayed')
+      },
+    })
+    await assert.rejects(
+      resumed.completeEvaluationJob(ack.evaluationJobRef),
+      (error: unknown) => error instanceof RefinementError && /cannot be retried safely/.test(error.message),
+    )
+    assert.equal(retryCalls, 0)
+    assert.equal(reopened.listArtifacts().filter(entry => entry.ref.startsWith('evaluation-arm-terminal:')).length, 1)
+    assert.equal(reopened.listArtifacts().filter(entry => entry.ref.startsWith('evaluation-arm-started:')).length, 2)
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true })
+  }
+})
+
+test('S1 concurrent evaluators allow only the RCS arm claimant to invoke the adapter', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'helix-evaluation-claim-'))
+  try {
+    const firstStore = new RefinementControlStore({ rootDir })
+    const base = firstStore.publishBaseline(document, { id: 'claim-base', revision: 0 })
+    let firstCalls = 0
+    let entered: (() => void) | undefined
+    let release: (() => void) | undefined
+    const enteredPromise = new Promise<void>(resolve => { entered = resolve })
+    const releasePromise = new Promise<void>(resolve => { release = resolve })
+    const blocking = adapter(base)
+    const original = blocking.evaluate
+    blocking.evaluate = async input => {
+      firstCalls += 1
+      entered!()
+      await releasePromise
+      return original(input)
+    }
+    const first = new RefinementWorkflow(firstStore, blocking)
+    const policyRef = first.publishPolicy(signedConfiguration('claim-policy', 'policy', policy))
+    const suiteRef = first.publishSuite(signedConfiguration('claim-suite', 'suite', suite))
+    const proposal = await proposeCandidate(first, { proposalId: 'claim-proposal', sourceRunRefs: ['source'], baselineRef: base, policyRef })
+    const ack = first.beginEvaluate({ candidateRef: proposal.candidateRef, policyRef, suiteRef })
+    const running = first.completeEvaluationJob(ack.evaluationJobRef)
+    await enteredPromise
+
+    const secondStore = new RefinementControlStore({ rootDir })
+    let secondCalls = 0
+    const second = new RefinementWorkflow(secondStore, {
+      generate: async () => { throw new Error('generation is not part of evaluation recovery') },
+      evaluate: async () => {
+        secondCalls += 1
+        throw new Error('concurrent evaluator must not invoke adapter')
+      },
+    })
+    await assert.rejects(
+      second.completeEvaluationJob(ack.evaluationJobRef),
+      (error: unknown) => error instanceof RefinementError && /cannot be retried safely/.test(error.message),
+    )
+    assert.equal(secondCalls, 0)
+    release!()
+    await running
+    assert.equal(firstCalls, 2)
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true })
+  }
+})
+
 test('S3 manual rejection is terminal and does not publish its reserved overlay', async () => {
   const rcs = new RefinementControlStore()
   const base = rcs.publishBaseline(document, { id: 'reject-base', revision: 0 })
