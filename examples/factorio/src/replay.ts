@@ -563,6 +563,17 @@ async function main(): Promise<void> {
     controlPlaneText: reconstructed.controlPlaneText,
     controlPlaneContentHash: reconstructed.controlPlaneContentHash,
     recursiveModel: { enabled: true },
+    // Evaluation runs override the scenario task from a frozen experiment
+    // profile. Reuse that evidence here so the model-visible ContextEnvelope
+    // (and therefore every cached LLM request hash) is identical to live.
+    ...(live.experimentProfile === undefined
+      ? {}
+      : {
+          taskOverride: {
+            id: live.experimentProfile.taskId,
+            instruction: live.experimentProfile.instruction,
+          },
+        }),
   })
   const remainingIO = cache.remaining()
   const objects: FileTraceObjectStore = objectStore()
