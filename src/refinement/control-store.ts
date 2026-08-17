@@ -210,18 +210,19 @@ export class RefinementControlStore {
 
   /** Existing #10 selection shape; RCS only gates visibility before delegation. */
   /** Write-once immutable control artifact. The caller owns schema/hash validation. */
-  putArtifact(ref: string, payload: unknown): void {
-    this.transaction(() => {
+  putArtifact(ref: string, payload: unknown): boolean {
+    return this.transaction(() => {
       if (!isNonEmpty(ref)) {
         throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'artifact ref is required')
       }
       const existing = this.snapshot.artifacts.find(entry => entry.ref === ref)
       const encoded = JSON.stringify(payload)
       if (existing !== undefined) {
-        if (JSON.stringify(existing.payload) === encoded) return
+        if (JSON.stringify(existing.payload) === encoded) return false
         throw refinementError('REFINEMENT_CANDIDATE_INVALID', 'artifact ref is immutable')
       }
       this.snapshot.artifacts.push({ ref, payload: structuredClone(payload) })
+      return true
     })
   }
 
