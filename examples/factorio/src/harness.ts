@@ -32,6 +32,8 @@ import {
 export const EXECUTE_CELL_TOOL = 'execute_cell'
 export const MAX_CELLS = 16
 export const MAX_MODEL_CALLS = 16
+/** Keep tool JSON from being truncated by lengthy hidden reasoning. */
+export const MAX_OUTER_MODEL_TOKENS = 4_096
 
 export interface HarnessOptions {
   runId: string
@@ -72,6 +74,7 @@ export interface HarnessOptions {
     remainingTokens: number
     recursiveCallCount: number
   }
+  taskOverride?: { id: string; instruction: string }
 }
 
 export interface HarnessResult {
@@ -185,12 +188,13 @@ function contextEnvelope(
     sessionId: string | null
     sessionVersion: number | null
   },
+  taskOverride?: { id: string; instruction: string },
 ): Record<string, unknown> {
   const lastCell = projection.cells.at(-1)
   const remainingCalls = Math.max(0, maxRecursiveCalls - projection.recursiveCallCount)
   const schema =
     pins.sessionAsyncVersion === '1' ? 'helix.context/v4' : 'helix.context/v3'
-  const taskInstruction = frozenHarness.document.control.taskNarrativeTemplate
+  const taskInstruction = taskOverride?.instruction ?? frozenHarness.document.control.taskNarrativeTemplate
   // pins.harnessState is required and equality-gated against frozenHarness
   // before the first model request; Context always records that same slice.
   const harnessSlice = pins.harnessState!
@@ -204,7 +208,7 @@ function contextEnvelope(
       harness: harnessSlice,
     },
     task: {
-      id: pins.taskId,
+      id: taskOverride?.id ?? pins.taskId,
       instruction: taskInstruction,
       acceptance: 'task_verification.success=true',
       trajectoryLength: 64,
@@ -391,15 +395,15 @@ function codeFromToolResponse(response: ModelResponse): { id: string; code: stri
   if (call.name !== EXECUTE_CELL_TOOL) {
     throw new Error(`model called unexpected tool ${call.name}`)
   }
-  if (call.invalidArguments) {
-    throw new Error(`${call.invalidArguments.code}: ${call.invalidArguments.message}`)
-  }
+  // Providers can expose a partial tool call when generation reaches its
+  // output limit. No tool ran, so retain the episode and request a retry.
+  if (call.invalidArguments) return undefined
   if (!call.input || typeof call.input !== 'object' || Array.isArray(call.input)) {
-    throw new Error('execute_cell input must be an object')
+    return undefined
   }
   const code = (call.input as Record<string, unknown>)['code']
   if (typeof code !== 'string' || code.trim() === '') {
-    throw new Error('execute_cell.code must be a non-empty string')
+    return undefined
   }
   return { id: call.id, code }
 }
@@ -496,6 +500,8 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
       maxRecursiveCalls,
       MAX_RECURSIVE_COMPLETION_TOKENS,
       options.frozenHarness,
+      undefined,
+      options.taskOverride,
     )
     const envelopeText = renderEnvelope(envelope)
     const messages = [
@@ -540,7 +546,7 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
       ],
       toolChoice: { type: 'any' },
       temperature: 0,
-      maxTokens: 8_096,
+      maxTokens: MAX_OUTER_MODEL_TOKENS,
       metadata: {
         runId: options.runId,
         renderer: options.pins.renderer,
@@ -567,7 +573,7 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
     if (!authored) {
       retryMessage = textMessage(
         'user',
-        'The previous response submitted no cell. Call execute_cell now; prose does not change the environment.',
+        'The previous response did not submit a valid non-empty execute_cell.code (it may have hit an output limit). Immediately call execute_cell with one concise cell; do not emit analysis or prose.',
       )
       continue
     }

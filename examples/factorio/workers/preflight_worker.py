@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
-import socket
 from typing import Any
 
+from factorio_rcon import RCONClient
 from fle.env.gym_env.registry import get_environment_info
 
 TASK_ID = "iron_ore_throughput"
@@ -28,11 +28,12 @@ def main() -> None:
     task = get_environment_info(TASK_ID)
     if task is None:
         raise RuntimeError(f"FLE did not register required task: {TASK_ID}")
-    reachable = False
+    authenticated = False
     try:
-        with socket.create_connection(("127.0.0.1", 27000), timeout=2.0):
-            reachable = True
-    except OSError:
+        client = RCONClient("127.0.0.1", 27000, "factorio", timeout=2.0)
+        client.close()
+        authenticated = True
+    except Exception:
         pass
     print(
         json.dumps(
@@ -40,7 +41,7 @@ def main() -> None:
                 "fle": importlib.metadata.version("factorio-learning-environment"),
                 "taskId": TASK_ID,
                 "taskDigest": digest(task),
-                "rconReachable": reachable,
+                "rconAuthenticated": authenticated,
             },
             sort_keys=True,
         )

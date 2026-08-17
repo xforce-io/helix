@@ -15,6 +15,7 @@ import {
   createFactorioRefinementCommandHost,
   createFactorioFixtureAssertion,
   EXAMPLE_BUNDLE,
+  extractGeneratedOverlayJson,
   extractFactorioEvaluationMetrics,
   factorioArmMetrics,
   FACTORIO_EXTRACTOR_DIGEST,
@@ -57,7 +58,22 @@ function recordedLive(runId: string, success: boolean): LiveEvidence {
       modelCallCount: 3,
       recursiveCallCount: 0,
       remainingRecursiveModelTokens: 0,
-      cells: [],
+      cells: [{
+        schema: 'helix.cell-execution/v3',
+        cellId: `${runId}:cell:0`,
+        source: 'x'.repeat(5_000),
+        sourceDigest: 'c'.repeat(64),
+        startRevision: 0,
+        endRevision: 1,
+        status: 'error',
+        stdoutPreview: '',
+        stderrPreview: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        namespace: [],
+        managedObjects: [],
+        error: { code: 'FIXTURE', message: 'm'.repeat(1_000) },
+      }],
       verification: { success, meta: [] },
       terminated: true,
       truncated: false,
@@ -424,6 +440,17 @@ test('S4 replay after promotion still uses recorded pins hash', async () => {
   }
 })
 
+test('P3 extracts one model-authored overlay object from explanatory transport text', () => {
+  const payload = extractGeneratedOverlayJson(
+    'I will improve the task narrative.\n```json\n{"schemaVersion":"helix.harness-overlay/v1","baseBaselineRef":{"kind":"baseline"},"changes":{"taskNarrativeTemplate":"be concise"}}\n```',
+  )
+  assert.match(payload, /^\{"schemaVersion"/)
+  assert.throws(
+    () => extractGeneratedOverlayJson('{"schemaVersion":"helix.harness-overlay/v1"} and {"schemaVersion":"helix.harness-overlay/v1"}'),
+    /exactly one complete/,
+  )
+})
+
 test('P3 projection is a bounded summary and rejects unfinished runs', () => {
   const live = recordedLive('factorio-ok', false)
   const projection = projectFactorioGenerationInput(['factorio-ok'], {
@@ -431,6 +458,10 @@ test('P3 projection is a bounded summary and rejects unfinished runs', () => {
   })
   assert.equal(projection.sourceRunRefs[0], 'factorio-ok')
   assert.equal(projection.outcomes[0]?.verificationSuccess, false)
+  assert.equal(projection.outcomes[0]?.recentFeedback.length, 1)
+  assert.equal(projection.outcomes[0]?.recentFeedback[0]?.source.length, 4_000)
+  assert.equal(projection.outcomes[0]?.recentFeedback[0]?.error?.message?.length, 512)
+  assert.match(projection.generationInstruction, /recentFeedback/)
   assert.match(projection.generationInstruction, /exactly one JSON object/)
   assert.equal('cells' in projection, false)
   assert.throws(
@@ -438,7 +469,8 @@ test('P3 projection is a bounded summary and rejects unfinished runs', () => {
     /recorded Factorio run/,
   )
   const unfinished = recordedLive('factorio-open', false)
-  unfinished.finalProjection.terminated = false
+  unfinished.termination = 'cancelled'
+  unfinished.finalization.value = 'unknown'
   assert.throws(
     () => projectFactorioGenerationInput(['factorio-open'], { readLive: () => unfinished }),
     /not terminal/,

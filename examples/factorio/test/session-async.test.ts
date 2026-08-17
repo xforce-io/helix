@@ -1466,6 +1466,7 @@ test('replay sessionEvidenceChecks requireSession from pins/schema even if sessi
     legacy.some(c => c.id === 'S7.session-projection'),
     false,
   )
+  assert.ok(legacy.every(c => c.passed))
 })
 
 test('B2 child capability token never enters attach input or LLM request body', async () => {

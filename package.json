@@ -27,6 +27,7 @@
     "verify:factorio:live": "tsx examples/factorio/src/live.ts",
     "verify:factorio:live:session": "HELIX_SESSION_ASYNC=1 tsx examples/factorio/src/live.ts",
     "verify:factorio:replay": "tsx examples/factorio/src/replay.ts",
+    "factorio:experiment": "tsx examples/factorio/src/experiment/cli.ts",
     "factorio:refine": "tsx src/refinement/cli.ts"
   },
   "engines": {

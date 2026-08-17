@@ -22,6 +22,12 @@ kernel = load("kernel_worker")
 
 
 class ActionPolicyTest(unittest.TestCase):
+    def test_experiment_profile_selects_registered_task_and_slot(self) -> None:
+        profile = {"inputRef": "factorio.throughput/iron-plate/v1", "taskId": "iron_plate_throughput", "slot": 0, "seed": 0, "digest": "sha256:test"}
+        self.assertEqual(bridge.experiment_task_and_slot({"experimentProfile": profile}), ("iron_plate_throughput", 0))
+        with self.assertRaisesRegex(ValueError, "EXPERIMENT_PROFILE_INVALID"):
+            bridge.experiment_task_and_slot({"experimentProfile": {**profile, "taskId": "iron_ore_throughput"}})
+
     def test_public_program_is_allowed(self) -> None:
         bridge.validate_action(
             "pos = nearest(Resource.IronOre)\n"

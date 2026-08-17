@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import argparse
 import platform
-import socket
 import subprocess
 import time
 from pathlib import Path
 
 import fle
+from factorio_rcon import RCONClient
 
-CONTAINER_NAME = "helix-factorio_0"
+CONTAINER_PREFIX = "helix-factorio_"
 IMAGE = "factoriotools/factorio:2.0.73"
 RCON_HOST_PORT = 27000
 GAME_HOST_PORT = 34197
@@ -21,17 +21,21 @@ def run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, check=check, text=True, capture_output=True)
 
 
-def container_exists() -> bool:
-    return run("docker", "inspect", CONTAINER_NAME, check=False).returncode == 0
+def container_name(slot: int) -> str:
+    return f"{CONTAINER_PREFIX}{slot}"
 
 
-def container_running() -> bool:
+def container_exists(slot: int) -> bool:
+    return run("docker", "inspect", container_name(slot), check=False).returncode == 0
+
+
+def container_running(slot: int) -> bool:
     result = run(
         "docker",
         "inspect",
         "--format",
         "{{.State.Running}}",
-        CONTAINER_NAME,
+        container_name(slot),
         check=False,
     )
     return result.returncode == 0 and result.stdout.strip() == "true"
@@ -50,28 +54,35 @@ def cluster_paths() -> tuple[Path, Path, Path, Path]:
     )
 
 
-def wait_for_rcon(timeout_seconds: float = 60.0) -> None:
+def wait_for_rcon(slot: int, timeout_seconds: float = 60.0) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if not container_running():
-            logs = run("docker", "logs", CONTAINER_NAME, check=False).stderr
+        if not container_running(slot):
+            logs = run("docker", "logs", container_name(slot), check=False).stderr
             raise RuntimeError(
                 f"Factorio exited before RCON was ready:\n{logs[-4000:]}"
             )
         try:
-            with socket.create_connection(("127.0.0.1", RCON_HOST_PORT), timeout=1.0):
-                return
-        except OSError:
+            # A listening TCP socket is not enough: Factorio opens RCON before
+            # the authentication handler is usable.  FLE creates this exact
+            # client during reset, so wait for the same successful handshake.
+            client = RCONClient(
+                "127.0.0.1", RCON_HOST_PORT + slot, "factorio", timeout=1.0
+            )
+            client.close()
+            return
+        except Exception:
             time.sleep(1)
-    raise TimeoutError("Factorio RCON did not become ready within 60 seconds")
+    raise TimeoutError("Factorio RCON authentication did not become ready within 60 seconds")
 
 
-def start() -> None:
-    if container_running():
-        print(f"{CONTAINER_NAME} is already running")
+def start_one(slot: int) -> None:
+    name = container_name(slot)
+    if container_running(slot):
+        print(f"{name} is already running")
         return
-    if container_exists():
-        run("docker", "rm", CONTAINER_NAME)
+    if container_exists(slot):
+        run("docker", "rm", name)
 
     scenarios, config, mods, screenshots = cluster_paths()
     is_arm = platform.machine().lower() in {"arm64", "aarch64"}
@@ -104,14 +115,14 @@ def start() -> None:
         "--mod-directory",
         "/opt/factorio/mods",
         "--map-gen-seed",
-        "44340",
+        str(44340 + slot),
     ]
     command = [
         "docker",
         "run",
         "-d",
         "--name",
-        CONTAINER_NAME,
+        name,
         "--label",
         "io.xforce.helix.factorio-smoke=true",
         "--platform",
@@ -119,9 +130,9 @@ def start() -> None:
         "--user",
         "factorio",
         "-p",
-        f"{GAME_HOST_PORT}:34197/udp",
+        f"{GAME_HOST_PORT + slot}:34197/udp",
         "-p",
-        f"{RCON_HOST_PORT}:27015/tcp",
+        f"{RCON_HOST_PORT + slot}:27015/tcp",
         "-v",
         f"{scenarios}:/opt/factorio/scenarios",
         "-v",
@@ -140,32 +151,37 @@ def start() -> None:
         *factorio_command,
     ]
     result = run(*command)
-    wait_for_rcon()
-    print(f"started {CONTAINER_NAME} ({result.stdout.strip()[:12]})")
+    wait_for_rcon(slot)
+    print(f"started {name} ({result.stdout.strip()[:12]})")
+
+
+def start(count: int) -> None:
+    if count < 1 or count > 32:
+        raise ValueError("count must be between 1 and 32")
+    for slot in range(count):
+        start_one(slot)
 
 
 def stop() -> None:
-    if not container_exists():
-        print(f"{CONTAINER_NAME} is not present")
+    listed = run(
+        "docker", "ps", "-a", "--filter", "label=io.xforce.helix.factorio-smoke=true",
+        "--format", "{{.Names}}",
+    ).stdout.splitlines()
+    names = sorted(name for name in listed if name.startswith(CONTAINER_PREFIX))
+    if not names:
+        print(f"no {CONTAINER_PREFIX} containers are present")
         return
-    label = run(
-        "docker",
-        "inspect",
-        "--format",
-        '{{index .Config.Labels "io.xforce.helix.factorio-smoke"}}',
-        CONTAINER_NAME,
-    ).stdout.strip()
-    if label != "true":
-        raise RuntimeError(f"refusing to remove unlabelled container {CONTAINER_NAME}")
-    run("docker", "rm", "-f", CONTAINER_NAME)
-    print(f"removed {CONTAINER_NAME}")
+    for name in names:
+        run("docker", "rm", "-f", name)
+        print(f"removed {name}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("start", "stop"))
+    parser.add_argument("--count", type=int, default=1, help="number of labelled FLE slots to start (1-32)")
     args = parser.parse_args()
-    start() if args.command == "start" else stop()
+    start(args.count) if args.command == "start" else stop()
 
 
 if __name__ == "__main__":

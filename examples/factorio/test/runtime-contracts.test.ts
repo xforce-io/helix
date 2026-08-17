@@ -87,7 +87,7 @@ test('preflight 校验精确容器身份、镜像、握手和任务固定版本'
       fle: '0.4.3',
       taskId: 'iron_ore_throughput',
       taskDigest: 'sha256:c50497c8548123494e48376e51ace2dd4f66717421de3a9f930d5833b6572f44',
-      rconReachable: true,
+      rconAuthenticated: true,
     })
   }
   preflightLive(runner, {})
