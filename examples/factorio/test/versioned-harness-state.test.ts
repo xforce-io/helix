@@ -59,6 +59,8 @@ import {
 } from '../src/harness-host.js'
 import {
   FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT,
+  FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT,
+  FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT,
   FACTORIO_V4_HARNESS_DOCUMENT,
   FACTORIO_V5_HARNESS_DOCUMENT,
   createFactorioScenarioAdapter,
@@ -304,8 +306,8 @@ test('S1.factorio-adapter-e2e-composition', () => {
   assert.match(assembled.controlPlaneText, /iron-ore/)
   assert.match(assembled.controlPlaneText, /Factorio Learning Environment/)
   assert.equal(assembled.record.pins.harness.harnessContentHash, assembled.frozen.harnessContentHash)
-  // Default P1 uses an explicit Store baseline ref.
-  assert.equal(assembled.frozen.selection.baselineRef.id, 'factorio.default-p1')
+  // Default P3 uses an explicit Store baseline ref while P1/P2 remain recorded.
+  assert.equal(assembled.frozen.selection.baselineRef.id, 'factorio.default-p3')
 })
 
 // ---------------------------------------------------------------------------
@@ -1147,7 +1149,7 @@ test('S4.legacy-registry-replay-and-manifest-provenance', () => {
   )
 })
 
-test('S4.factorio-default-p1-uses-store-baseline', () => {
+test('S4.factorio-default-p3-uses-store-baseline', () => {
   const bundle = createFactorioHostBundle()
   const v4 = assembleFactorioRun({
     bundle,
@@ -1159,7 +1161,7 @@ test('S4.factorio-default-p1-uses-store-baseline', () => {
     basePins: pinsSessionAsync('m'),
     baselineRef: bundle.legacyV5BaselineRef,
   })
-  assert.equal(v4.frozen.selection.baselineRef.id, 'factorio.default-p1')
+  assert.equal(v4.frozen.selection.baselineRef.id, 'factorio.default-p3')
   assert.equal(v5.frozen.selection.baselineRef.id, 'factorio.legacy-v5')
   assert.ok(v4.pins.harnessState)
   assert.ok(v5.pins.harnessState)
@@ -1172,7 +1174,7 @@ test('S4.factorio-default-p1-uses-store-baseline', () => {
   const adapter = createFactorioScenarioAdapter()
   assert.equal(adapter.scenarioId, 'factorio.iron_ore_throughput')
   assert.equal(
-    baselineContentHash(FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT),
+    baselineContentHash(FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT),
     v4.frozen.selection.baselineRef.contentHash,
   )
   assert.equal(

@@ -253,7 +253,10 @@ export function createFactorioRefinementCommandHost(options: {
     : undefined
   const rcs = options.rcs ?? bundle!.rcs
   const baselines = rcs.exportSnapshot().baselines
-  const defaultPublished = baselines.find(entry => entry.ref.id === 'factorio.default-p1') ?? baselines[0]
+  const defaultPublished = baselines.find(entry => entry.ref.id === 'factorio.default-p3') ??
+    baselines.find(entry => entry.ref.id === 'factorio.default-p2') ??
+    baselines.find(entry => entry.ref.id === 'factorio.default-p1') ??
+    baselines[0]
   if (defaultPublished === undefined) {
     throw new Error('Factorio refinement Host requires a published baseline')
   }
@@ -369,14 +372,15 @@ function createFactorioGenerationPort(
   return new DefaultIOPort(result.gateway)
 }
 
-/** A failed candidate may be inspected, but can never reach promotion. */
+/**
+ * Preserve every real arm, including a failed candidate, as an auditable
+ * quality-zero observation. Promotion remains fail-closed in the evaluation
+ * gate: a failed candidate cannot satisfy a positive quality delta.
+ */
 export function factorioArmMetrics(
-  arm: 'baseline' | 'candidate',
+  _arm: 'baseline' | 'candidate',
   live: LiveEvidence,
 ): ReturnType<typeof extractFactorioEvaluationMetrics> {
-  if (arm === 'candidate' && !live.finalProjection.verification.success) {
-    throw new Error('Factorio candidate FLE verification must succeed before promotion')
-  }
   return extractFactorioEvaluationMetrics(live)
 }
 

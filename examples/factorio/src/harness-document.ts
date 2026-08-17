@@ -109,6 +109,63 @@ export const FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT: HarnessDocument = {
   },
 }
 
+/**
+ * P2 keeps P1's task and immutable safety boundary, but makes the two runtime
+ * representations that repeatedly caused real-run failures explicit.  It is a
+ * new baseline rather than a mutation of P1 so old live evidence remains
+ * replayable by its recorded content hash.
+ */
+export const FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT: HarnessDocument = {
+  schemaVersion: 'helix.harness/v1',
+  control: {
+    systemInstructionTemplate: `${FACTORIO_V4_HARNESS_DOCUMENT.control.systemInstructionTemplate}
+
+IPython/FLE result contract:
+- factorio.reset() and factorio.step(program) return an EffectResult. Read it with result.observation, result.refs, result.metrics, result.get('observation'), or result['observation']. It has no factorioEffect, status, stdout, or rawText attribute.
+- Keep result inspection in the outer IPython cell. The string passed to factorio.step is a separately restricted FLE action program: call only top-level names from actionCapabilities. Do not call any object method there (including append, get, keys, or attributes); use literals, comprehensions, indexing, and the listed top-level functions instead.
+- Pass an actual Position(x=..., y=...) to place_entity. Do not pass an uninspected helper return value as a placement position. If a placement fails, print the compact observation, then make one small correction in the next cell.
+- Do not dump inventories or all entities. Print only the few positions, statuses, warnings, quantities, and taskVerification fields needed for the next action.`,
+    taskNarrativeTemplate:
+      FACTORIO_V4_HARNESS_DOCUMENT.control.taskNarrativeTemplate,
+    protocolRules: [...FACTORIO_V4_HARNESS_DOCUMENT.control.protocolRules],
+    termination: {
+      successSource: 'scenario-verifier',
+      stopConditions: [
+        ...FACTORIO_V4_HARNESS_DOCUMENT.control.termination.stopConditions,
+      ],
+    },
+  },
+  catalogCards: [{ id: 'helix.models', version: '1.0.0' }],
+  compatibility: {
+    codeProtocolPins: ['factorio-rlm/v4'],
+  },
+}
+
+/** P3 is the immutable follow-up to the real P2 allowlist-error evidence. */
+export const FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT: HarnessDocument = {
+  schemaVersion: 'helix.harness/v1',
+  control: {
+    systemInstructionTemplate: `${FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT.control.systemInstructionTemplate}
+
+Action-program hard boundary:
+- Before calling factorio.step, keep its program straight-line and make no dotted call at all. In particular, dict.get, list.append, get_resource_field, and every invented get_* helper are unavailable there.
+- A rejected action has no environment effect. On ACTION_CALL_NOT_ALLOWED, remove that call and use only a known allowlisted top-level alternative in the next cell; do not probe more methods.`,
+    taskNarrativeTemplate:
+      FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT.control.taskNarrativeTemplate,
+    protocolRules: [...FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT.control.protocolRules],
+    termination: {
+      successSource: 'scenario-verifier',
+      stopConditions: [
+        ...FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT.control.termination.stopConditions,
+      ],
+    },
+  },
+  catalogCards: [{ id: 'helix.models', version: '1.0.0' }],
+  compatibility: {
+    codeProtocolPins: ['factorio-rlm/v4'],
+  },
+}
+
 export const FACTORIO_TASK_NARRATIVE =
   'Create an automatic iron-ore factory that produces at least 16 iron-ore per 60 in-game seconds.'
 
