@@ -33,6 +33,8 @@ import {
 import { RefinementControlStore } from '../../../src/refinement/control-store.js'
 import {
   FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT,
+  FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT,
+  FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT,
   FACTORIO_V4_HARNESS_DOCUMENT,
   FACTORIO_V5_HARNESS_DOCUMENT,
   createFactorioScenarioAdapter,
@@ -93,10 +95,22 @@ export function createFactorioHostBundle(
   const rcs = new RefinementControlStore(rootDir === undefined ? {} : { rootDir })
   if (rootDir !== undefined) importLegacyHarnessStoreIfPresent(rcs, rootDir)
   const store = rcsHarnessView(rcs)
-  const defaultBaselineRef = publishBaselineIfAbsent(store, {
+  // Keep P1 materialized for recorded selections and old candidates. New live
+  // runs use P2, whose contract clarification is an immutable new baseline.
+  publishBaselineIfAbsent(store, {
     id: 'factorio.default-p1',
     revision: 1,
     document: FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT,
+  })
+  const defaultBaselineRef = publishBaselineIfAbsent(store, {
+    id: 'factorio.default-p3',
+    revision: 1,
+    document: FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT,
+  })
+  publishBaselineIfAbsent(store, {
+    id: 'factorio.default-p2',
+    revision: 1,
+    document: FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT,
   })
   const legacyV4BaselineRef = publishBaselineIfAbsent(store, {
     id: 'factorio.legacy-v4',

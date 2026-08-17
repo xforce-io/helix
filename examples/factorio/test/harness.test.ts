@@ -12,6 +12,11 @@ import {
   assembleFactorioRun,
   createFactorioHostBundle,
 } from '../src/harness-host.js'
+import {
+  FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT,
+  FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT,
+  FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT,
+} from '../src/harness-document.js'
 import type {
   CellExecutionRecord,
   FactorioEffect,
@@ -46,6 +51,24 @@ function assembleTestRun() {
         : bundle.defaultBaselineRef,
   })
 }
+
+test('P2 baseline documents the IPython and restricted-action result contracts', () => {
+  const instruction = FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT.control.systemInstructionTemplate
+  assert.match(instruction, /result\.observation/)
+  assert.match(instruction, /no factorioEffect/)
+  assert.match(instruction, /including append/)
+  assert.match(instruction, /Position\(x=\.\.\., y=\.\.\.\)/)
+  assert.equal(FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT.control.taskNarrativeTemplate,
+    FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT.control.taskNarrativeTemplate)
+})
+
+test('P3 baseline forbids method-call probing inside FLE action programs', () => {
+  const instruction = FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT.control.systemInstructionTemplate
+  assert.match(instruction, /make no dotted call at all/)
+  assert.match(instruction, /dict\.get, list\.append, get_resource_field/)
+  assert.equal(FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT.control.taskNarrativeTemplate,
+    FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT.control.taskNarrativeTemplate)
+})
 
 
 function ref(kind: ObjectRef['kind'], hash: string): ObjectRef {

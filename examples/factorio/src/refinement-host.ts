@@ -253,7 +253,10 @@ export function createFactorioRefinementCommandHost(options: {
     : undefined
   const rcs = options.rcs ?? bundle!.rcs
   const baselines = rcs.exportSnapshot().baselines
-  const defaultPublished = baselines.find(entry => entry.ref.id === 'factorio.default-p1') ?? baselines[0]
+  const defaultPublished = baselines.find(entry => entry.ref.id === 'factorio.default-p3') ??
+    baselines.find(entry => entry.ref.id === 'factorio.default-p2') ??
+    baselines.find(entry => entry.ref.id === 'factorio.default-p1') ??
+    baselines[0]
   if (defaultPublished === undefined) {
     throw new Error('Factorio refinement Host requires a published baseline')
   }

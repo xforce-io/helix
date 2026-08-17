@@ -345,7 +345,7 @@ test('P3 fixture E2E: recorded P1 → propose → two arms → request → human
       overlayRef: promoted.overlayRef,
     })
     assert.equal(nextRun.pins.harnessState?.overlayRef?.contentHash, promoted.overlayRef.contentHash)
-    assert.equal(bundle.rcs.exportSnapshot().baselines.length, 3)
+    assert.equal(bundle.rcs.exportSnapshot().baselines.length, 5)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
