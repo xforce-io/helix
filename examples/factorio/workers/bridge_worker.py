@@ -17,6 +17,18 @@ from fle.env.gym_env.action import Action
 
 PROTOCOL_VERSION = "2"
 TASK_ID = "iron_ore_throughput"
+EXPERIMENT_TASKS = {
+    "factorio.throughput/iron-ore/v1": "iron_ore_throughput",
+    "factorio.throughput/iron-plate/v1": "iron_plate_throughput",
+    "factorio.throughput/iron-gear-wheel/v1": "iron_gear_wheel_throughput",
+    "factorio.throughput/inserter/v1": "inserter_throughput",
+    "factorio.throughput/electronic-circuit/v1": "electronic_circuit_throughput",
+    "factorio.throughput/steel-plate/v1": "steel_plate_throughput",
+    "factorio.throughput/advanced-circuit/v1": "advanced_circuit_throughput",
+    "factorio.throughput/engine-unit/v1": "engine_unit_throughput",
+    "factorio.throughput/automation-science-pack/v1": "automation_science_pack_throughput",
+    "factorio.throughput/logistics-science-pack/v1": "logistics_science_pack_throughput",
+}
 MAX_ACTION_CHARS = 10_000
 ALLOWED_CALLS = {
     "BuildingBox",
@@ -190,6 +202,23 @@ def verification(observation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def experiment_task_and_slot(params: dict[str, Any]) -> tuple[str, int]:
+    profile = params.get("experimentProfile")
+    if profile is None:
+        return TASK_ID, 0
+    if not isinstance(profile, dict):
+        raise ValueError("EXPERIMENT_PROFILE_INVALID: profile must be an object")
+    task_id = EXPERIMENT_TASKS.get(profile.get("inputRef"))
+    slot = profile.get("slot")
+    if task_id is None or profile.get("taskId") != task_id:
+        raise ValueError("EXPERIMENT_PROFILE_INVALID: task is not registered")
+    if not isinstance(slot, int) or isinstance(slot, bool) or slot < 0 or profile.get("seed") != slot:
+        raise ValueError("EXPERIMENT_PROFILE_INVALID: slot/seed is invalid")
+    if not isinstance(profile.get("digest"), str) or not profile["digest"]:
+        raise ValueError("EXPERIMENT_PROFILE_INVALID: digest is required")
+    return task_id, slot
+
+
 def main() -> None:
     env = None
     ledger = CommandLedger()
@@ -271,7 +300,8 @@ def main() -> None:
             with contextlib.redirect_stdout(logs), contextlib.redirect_stderr(logs):
                 if method == "reset":
                     if env is None:
-                        env = gym.make(TASK_ID, run_idx=0)
+                        task_id, slot = experiment_task_and_slot(request.get("params") or {})
+                        env = gym.make(task_id, run_idx=slot)
                     observation, _ = env.reset(options={"game_state": None})
                     state_raw = GameState.from_instance(env.unwrapped.instance).to_raw()
                     result = {

@@ -22,7 +22,15 @@ export const FINALIZATION_ROOT = path.join(ARTIFACT_ROOT, 'final-outcomes')
 /** Durable Helix session ledger/checkpoint root (Issue #7). */
 export const SESSION_STORE_ROOT = path.join(ARTIFACT_ROOT, 'sessions')
 /** Host-held immutable harness Store + legacy registry root (Issue #10). */
-export const HARNESS_STATE_ROOT = path.join(ARTIFACT_ROOT, 'harness-state')
+/**
+ * A test-only/experiment override keeps a fresh live run from mutating or
+ * depending on the operator's durable default RCS state.  It deliberately
+ * changes only the Factorio example's local store location.
+ */
+export const HARNESS_STATE_ROOT = path.resolve(
+  process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT'] ??
+    path.join(ARTIFACT_ROOT, 'harness-state'),
+)
 export const LIVE_WALL_TIMEOUT_MS = 30 * 60 * 1_000
 export const REPLAY_WALL_TIMEOUT_MS = 5 * 60 * 1_000
 export const MILKIE_COMMIT = 'fec0ebfb99f57e04a0812fc74fd01f85e9b81b57'

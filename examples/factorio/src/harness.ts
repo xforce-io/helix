@@ -72,6 +72,7 @@ export interface HarnessOptions {
     remainingTokens: number
     recursiveCallCount: number
   }
+  taskOverride?: { id: string; instruction: string }
 }
 
 export interface HarnessResult {
@@ -185,12 +186,13 @@ function contextEnvelope(
     sessionId: string | null
     sessionVersion: number | null
   },
+  taskOverride?: { id: string; instruction: string },
 ): Record<string, unknown> {
   const lastCell = projection.cells.at(-1)
   const remainingCalls = Math.max(0, maxRecursiveCalls - projection.recursiveCallCount)
   const schema =
     pins.sessionAsyncVersion === '1' ? 'helix.context/v4' : 'helix.context/v3'
-  const taskInstruction = frozenHarness.document.control.taskNarrativeTemplate
+  const taskInstruction = taskOverride?.instruction ?? frozenHarness.document.control.taskNarrativeTemplate
   // pins.harnessState is required and equality-gated against frozenHarness
   // before the first model request; Context always records that same slice.
   const harnessSlice = pins.harnessState!
@@ -204,7 +206,7 @@ function contextEnvelope(
       harness: harnessSlice,
     },
     task: {
-      id: pins.taskId,
+      id: taskOverride?.id ?? pins.taskId,
       instruction: taskInstruction,
       acceptance: 'task_verification.success=true',
       trajectoryLength: 64,
@@ -496,6 +498,8 @@ export async function runHarness(options: HarnessOptions): Promise<HarnessResult
       maxRecursiveCalls,
       MAX_RECURSIVE_COMPLETION_TOKENS,
       options.frozenHarness,
+      undefined,
+      options.taskOverride,
     )
     const envelopeText = renderEnvelope(envelope)
     const messages = [

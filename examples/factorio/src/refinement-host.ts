@@ -35,6 +35,7 @@ import {
 } from './harness-host.js'
 import { runAssembledFactorioLive } from './live.js'
 import type { LiveEvidence } from './types.js'
+import { resolveFactorioExperimentCase } from './experiment/cases.js'
 
 export const FACTORIO_EXTRACTOR_DIGEST = createHash('sha256')
   .update('helix.factorio.extractor/v1')
@@ -297,7 +298,7 @@ function createLiveFactorioRunArm(
   bundle: FactorioHostBundle | undefined,
   model: string,
 ): FactorioRunArm {
-  return async ({ arm, reservedRunRef, pins: harnessPins }) => {
+  return async ({ arm, case: evaluationCase, reservedRunRef, pins: harnessPins }) => {
     if (bundle === undefined) {
       throw new Error('live Factorio evaluation requires a Host-created RCS bundle')
     }
@@ -310,11 +311,13 @@ function createLiveFactorioRunArm(
       basePins: pins(model),
       harnessPins,
     })
+    const experimentProfile = resolveFactorioExperimentCase(evaluationCase)
     const result = await runAssembledFactorioLive({
       assembled,
       model,
       runId: reservedRunRef,
       evidencePath: path.join(ARTIFACT_ROOT, 'evals', reservedRunRef, 'live.json'),
+      experimentProfile,
     })
     return {
       runRef: reservedRunRef,

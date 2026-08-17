@@ -47,6 +47,7 @@ import type {
   ObjectRef,
   TerminationReason,
 } from './types.js'
+import type { FactorioExperimentProfile } from './experiment/cases.js'
 import {
   buildChildRunIds,
   decideFinalOutcome,
@@ -97,6 +98,7 @@ export type RunAssembledFactorioLiveInput = {
   evidencePath?: string
   /** Optional injected gateway (tests); default path uses connectModel generate. */
   gateway?: IModelGateway
+  experimentProfile?: FactorioExperimentProfile
 }
 
 export type RunAssembledFactorioLiveResult = {
@@ -208,6 +210,7 @@ export async function runAssembledFactorioLive(
     frozenHarness: assembled.frozen,
     control,
     childPortFactory,
+    ...(input.experimentProfile === undefined ? {} : { experimentProfile: input.experimentProfile }),
     ...(sessionAsyncEnabled
       ? {
           sessionAsync: {
@@ -235,7 +238,7 @@ export async function runAssembledFactorioLive(
 
   await port.attach({
     agentId: 'helix.factorio.rlm',
-    goal: 'Solve iron_ore_throughput through model-owned persistent IPython cells',
+    goal: input.experimentProfile?.instruction ?? 'Solve iron_ore_throughput through model-owned persistent IPython cells',
     input: 'ContextEnvelope only; no fixed action program',
     contextId: episodeId,
   })
@@ -262,6 +265,7 @@ export async function runAssembledFactorioLive(
       controlPlaneText: assembled.controlPlaneText,
       controlPlaneContentHash: assembled.controlPlaneContentHash,
       recursiveModel: { enabled: true },
+      ...(input.experimentProfile === undefined ? {} : { taskOverride: { id: input.experimentProfile.taskId, instruction: input.experimentProfile.instruction } }),
       getRecursiveBudget: () => {
         const pool = executor.getBudgetPool()
         return {
@@ -461,6 +465,7 @@ export async function runAssembledFactorioLive(
     traceFile: path.join(TRACE_ROOT, `${runId}.jsonl`),
     objectStore: OBJECT_ROOT,
     finalProjection: projection,
+    ...(input.experimentProfile === undefined ? {} : { experimentProfile: input.experimentProfile }),
     finalization,
     childRunIds: evidenceChildRunIds,
     ...(evidenceNonReplayable.length > 0

@@ -54,6 +54,7 @@ import type {
   SessionEffect,
   TaskVerification,
 } from './types.js'
+import type { FactorioExperimentProfile } from './experiment/cases.js'
 
 interface ExecuteCellInput {
   cellId: string
@@ -144,6 +145,7 @@ export interface LiveCellExecutorOptions {
   internalFaultAfterInvoke?: boolean
   /** Issue #7 session/async/mailbox host options. */
   sessionAsync?: SessionAsyncHostOptions
+  experimentProfile?: FactorioExperimentProfile
 }
 
 /** Mutable stage tracker for post-prepare INTERNAL / unexpected failure handling. */
@@ -343,6 +345,7 @@ export class LiveCellExecutor {
   private attachFault: LiveCellExecutorOptions['attachFault']
   private internalFaultAfterPrepare: boolean
   private internalFaultAfterInvoke: boolean
+  private readonly experimentProfile: FactorioExperimentProfile | undefined
   /** In-flight post-prepare stage for INTERNAL catch (not concurrent). */
   private activeModelsCallStage: ModelsCallStage | undefined
   private pendingControlTermination: 'cancelled' | 'wall_budget_exhausted' | undefined
@@ -384,6 +387,7 @@ export class LiveCellExecutor {
     this.attachFault = options.attachFault
     this.internalFaultAfterPrepare = options.internalFaultAfterPrepare === true
     this.internalFaultAfterInvoke = options.internalFaultAfterInvoke === true
+    this.experimentProfile = options.experimentProfile
     if (options.sessionAsync) {
       const saOpts: SessionAsyncHostOptions = { ...options.sessionAsync }
       if (options.control) saOpts.control = options.control
@@ -1291,6 +1295,9 @@ export class LiveCellExecutor {
       commandId,
       {
         ...(program === undefined ? {} : { program }),
+        ...(method === 'reset' && this.experimentProfile !== undefined
+          ? { experimentProfile: this.experimentProfile }
+          : {}),
         ...(method === 'step' && this.stateRaw !== undefined
           ? { stateRaw: this.stateRaw }
           : {}),
