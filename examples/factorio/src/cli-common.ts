@@ -142,8 +142,8 @@ export function preflightLive(
   if (facts['taskId'] !== 'iron_ore_throughput' || facts['taskDigest'] !== TASK_DIGEST) {
     throw new Error('FLE task identity or digest mismatch')
   }
-  if (facts['rconReachable'] !== true) {
-    throw new Error('Factorio RCON handshake endpoint is unreachable')
+  if (facts['rconAuthenticated'] !== true) {
+    throw new Error('Factorio RCON authentication is not ready')
   }
 }
 

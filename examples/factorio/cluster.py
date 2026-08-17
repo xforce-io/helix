@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 import platform
-import socket
 import subprocess
 import time
 from pathlib import Path
 
 import fle
+from factorio_rcon import RCONClient
 
 CONTAINER_PREFIX = "helix-factorio_"
 IMAGE = "factoriotools/factorio:2.0.73"
@@ -63,11 +63,17 @@ def wait_for_rcon(slot: int, timeout_seconds: float = 60.0) -> None:
                 f"Factorio exited before RCON was ready:\n{logs[-4000:]}"
             )
         try:
-            with socket.create_connection(("127.0.0.1", RCON_HOST_PORT + slot), timeout=1.0):
-                return
-        except OSError:
+            # A listening TCP socket is not enough: Factorio opens RCON before
+            # the authentication handler is usable.  FLE creates this exact
+            # client during reset, so wait for the same successful handshake.
+            client = RCONClient(
+                "127.0.0.1", RCON_HOST_PORT + slot, "factorio", timeout=1.0
+            )
+            client.close()
+            return
+        except Exception:
             time.sleep(1)
-    raise TimeoutError("Factorio RCON did not become ready within 60 seconds")
+    raise TimeoutError("Factorio RCON authentication did not become ready within 60 seconds")
 
 
 def start_one(slot: int) -> None:

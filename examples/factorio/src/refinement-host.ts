@@ -81,11 +81,67 @@ export type FactorioGenerationProjection = {
     verificationSuccess: boolean
     termination: LiveEvidence['termination']
     modelCallCount: number
+    /** Bounded model-authored action/error feedback, never raw traces. */
+    recentFeedback: Array<{
+      source: string
+      status: string
+      error?: { code?: string; message?: string }
+      verification?: boolean
+      observation?: string
+    }>
     harnessContentHash?: string
   }>
 }
 
 export const parseHarnessStateRef = parseFactorioHarnessStateRef
+
+/**
+ * The generation transport may return explanatory prose before/after a model
+ * authored JSON object. Select exactly one complete overlay-shaped object;
+ * ambiguity still fails closed in the normal admission guard.
+ */
+export function extractGeneratedOverlayJson(text: string): string {
+  const objects: string[] = []
+  let start = -1
+  let depth = 0
+  let quoted = false
+  let escaped = false
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!
+    if (start === -1) {
+      if (char === '{') {
+        start = index
+        depth = 1
+      }
+      continue
+    }
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') quoted = false
+      continue
+    }
+    if (char === '"') quoted = true
+    else if (char === '{') depth += 1
+    else if (char === '}') {
+      depth -= 1
+      if (depth === 0) {
+        const candidate = text.slice(start, index + 1)
+        try {
+          const parsed = JSON.parse(candidate) as Record<string, unknown>
+          if (parsed.schemaVersion === 'helix.harness-overlay/v1') objects.push(candidate)
+        } catch {
+          // A brace-delimited prose fragment is not an overlay candidate.
+        }
+        start = -1
+      }
+    }
+  }
+  if (objects.length !== 1) {
+    throw new Error(`generation must contain exactly one complete HarnessOverlay JSON object; found ${objects.length}`)
+  }
+  return objects[0]!
+}
 
 export function projectFactorioGenerationInput(
   sourceRunRefs: string[],
@@ -101,7 +157,15 @@ export function projectFactorioGenerationInput(
     if (live === undefined) {
       throw new Error(`recorded Factorio run is missing: ${runId}`)
     }
-    if (!live.finalProjection.terminated) {
+    // An FLE episode need not reach the environment's `terminated` flag to be
+    // a completed learning signal: the most valuable evolution inputs are
+    // often model/cell-budget failures.  Milkie finalization is the lifecycle
+    // authority; cancellation/unknown never become a generation source.
+    if (
+      live.termination === 'cancelled' ||
+      live.finalization.value === 'unknown' ||
+      (live.finalization.status !== 'finalized' && live.finalization.status !== 'idempotent')
+    ) {
       throw new Error(`recorded Factorio run is not terminal: ${runId}`)
     }
     outcomes.push({
@@ -109,6 +173,26 @@ export function projectFactorioGenerationInput(
       verificationSuccess: live.finalProjection.verification.success,
       termination: live.termination,
       modelCallCount: live.finalProjection.modelCallCount,
+      recentFeedback: live.finalProjection.cells.slice(-2).map(cell => ({
+        source: (cell.source ?? '').slice(0, 4_000),
+        status: cell.status,
+        ...(cell.error === undefined
+          ? {}
+          : {
+              error: {
+                ...(cell.error.code === undefined ? {} : { code: cell.error.code }),
+                ...(cell.error.message === undefined
+                  ? {}
+                  : { message: cell.error.message.slice(0, 512) }),
+              },
+            }),
+        ...(cell.factorioEffect === undefined
+          ? {}
+          : {
+              verification: cell.factorioEffect.verification.success,
+              observation: String(cell.factorioEffect.observation.rawText ?? '').slice(0, 1_024),
+            }),
+      })),
       ...(live.pins.harnessState === undefined
         ? {}
         : { harnessContentHash: live.pins.harnessState.harnessContentHash }),
@@ -118,8 +202,9 @@ export function projectFactorioGenerationInput(
     generationInstruction: [
       'Return exactly one JSON object and no Markdown, prose, code fence, or import.',
       'The object must be a helix.harness-overlay/v1 HarnessOverlay whose baseBaselineRef exactly equals the proposal baselineRef.',
-      'Its changes must be non-empty and limited to taskNarrativeTemplate, protocolRules, stopConditions, or catalogCards.',
-      'Do not include policy, suite, source evidence, credentials, aliases, promotion requests, or a second overlay.',
+      'Its changes must contain exactly one non-empty taskNarrativeTemplate string and no other fields.',
+      'Do not modify protocolRules, stopConditions, systemInstructionTemplate, catalogCards, policy, suite, source evidence, credentials, aliases, promotion requests, or add a second overlay.',
+      'Use the bounded recentFeedback to write a concrete, low-risk execution plan that reuses successful actions and avoids recorded errors; do not emit Python code.',
     ].join(' '),
     sourceRunRefs: [...sourceRunRefs],
     outcomes,
@@ -215,11 +300,12 @@ export function createFactorioRefinementCommandHost(options: {
         )
       }
       const result = await baseAdapter.generate(input)
+      const payloadText = extractGeneratedOverlayJson(result.payloadText)
       
       // Fail-closed: validate that generated overlay preserves Factorio protocol
       try {
         const admitted = admitGeneratedOverlayPayload({
-          payloadText: result.payloadText,
+          payloadText,
           baseBaselineRef: input.baselineRef,
         })
         const protocolError = validateFactorioOverlayProtocol(admitted.overlay)
@@ -232,7 +318,7 @@ export function createFactorioRefinementCommandHost(options: {
         )
       }
       
-      return result
+      return { ...result, payloadText }
     },
   }
   return {
@@ -327,12 +413,20 @@ function createLiveFactorioRunArm(
 }
 
 function readRecordedLiveEvidence(runId: string): LiveEvidence | undefined {
-  const file = path.join(ARTIFACT_ROOT, 'runs', runId, 'live.json')
-  try {
-    return parseRecordedFactorioLiveEvidence(fs.readFileSync(file, 'utf8'))
-  } catch {
-    return undefined
+  for (const file of [
+    path.join(ARTIFACT_ROOT, 'runs', runId, 'live.json'),
+    // An evaluator run is also a recorded real FLE trajectory.  This enables
+    // later generations to learn from a verified prior baseline/candidate
+    // without duplicating that immutable evidence under `runs/`.
+    path.join(ARTIFACT_ROOT, 'evals', runId, 'live.json'),
+  ]) {
+    try {
+      return parseRecordedFactorioLiveEvidence(fs.readFileSync(file, 'utf8'))
+    } catch {
+      // Try the other immutable record location.
+    }
   }
+  return undefined
 }
 
 /**

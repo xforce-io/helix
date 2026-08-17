@@ -254,7 +254,7 @@ export function sessionAsyncEvidenceRequired(args: {
   return false
 }
 
-/** Fail-closed session evidence gate for live/replay v4 artifacts. */
+/** Fail-closed session evidence gate for supported live/replay artifacts. */
 export function sessionEvidenceChecks(args: {
   live: {
     schema?: string
@@ -294,6 +294,8 @@ export function sessionEvidenceChecks(args: {
   const requireSession = args.requireSession === true || autoRequire
   const schemaOk =
     args.live.schema === undefined ||
+    args.live.schema === 'helix.factorio.live/v3' ||
+    args.live.schema === 'helix.factorio.replay/v3' ||
     args.live.schema === 'helix.factorio.live/v4' ||
     args.live.schema === 'helix.factorio.replay/v4'
   const hasSession = Boolean(args.live.session?.id)

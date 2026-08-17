@@ -93,6 +93,34 @@ function assertSameNumber(actual: number, expected: number, label: string): void
   if (actual !== expected) throw new Error(`${label} differs from immutable live evidence`)
 }
 
+/**
+ * A replay of a failed task is still valid evidence when it deterministically
+ * reproduces the recorded failure.  `verdict=pass` additionally includes
+ * S2.live-success, so it cannot serve as the experiment's replay predicate.
+ */
+function replayReproduced(record: Record<string, unknown>): boolean {
+  const checks = record.checks
+  if (!Array.isArray(checks)) return record.verdict === 'pass'
+  const required = new Set([
+    'S2.parent-replay-zero-live',
+    'S2.parent-replay-io-consumed',
+    'S2.parent-replay-projection',
+    'S2.replay-object-refs',
+    'S2.replay-finalization',
+    'S3.replay-zero-live-effects',
+    'S3.replay-io-consumed',
+  ])
+  const found = new Set<string>()
+  for (const value of checks) {
+    const check = asRecord(value)
+    if (check !== undefined && typeof check.id === 'string' && required.has(check.id)) {
+      if (check.passed !== true) return false
+      found.add(check.id)
+    }
+  }
+  return found.size === required.size
+}
+
 async function verifyArmEvidence(input: {
   arm: ExperimentArm
   livePath: string
@@ -133,7 +161,7 @@ async function verifyArmEvidence(input: {
     `${input.label}.latencyMs`,
   )
   if (success !== input.arm.success) throw new Error(`${input.label}.success differs from immutable live evidence`)
-  if ((replayRecord.verdict === 'pass') !== input.arm.replayPassed) {
+  if (replayReproduced(replayRecord) !== input.arm.replayPassed) {
     throw new Error(`${input.label}.replayPassed differs from immutable replay evidence`)
   }
 }

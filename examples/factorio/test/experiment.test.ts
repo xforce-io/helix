@@ -73,3 +73,32 @@ test('experiment index is closed, canonical, and binds analysis to candidate and
   assert.equal(JSON.parse(await readFile(written.path, 'utf8')).overlayRef, 'overlay:factorio.candidate@1#123')
   assert.throws(() => parseExperimentEvidenceIndex(JSON.stringify({ ...index, pairs: [...pairs, pairs[0]] })), /duplicate caseId/)
 })
+
+test('experiment evidence accepts a deterministically replayed failed arm', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'helix-factorio-experiment-replay-'))
+  const livePaths = [path.join(temp, 'baseline-live.json'), path.join(temp, 'candidate-live.json')]
+  const replayPaths = [path.join(temp, 'baseline-replay.json'), path.join(temp, 'candidate-replay.json')]
+  const live = JSON.stringify({ finalProjection: { verification: { success: false }, modelCallCount: 2 }, budget: { deadlineAt: 1, remainingWallMsAtEnd: 1_800_000 - 2 } })
+  const replay = JSON.stringify({
+    verdict: 'fail',
+    checks: [
+      'S2.parent-replay-zero-live', 'S2.parent-replay-io-consumed',
+      'S2.parent-replay-projection', 'S2.replay-object-refs',
+      'S2.replay-finalization', 'S3.replay-zero-live-effects',
+      'S3.replay-io-consumed',
+    ].map(id => ({ id, passed: true })),
+  })
+  await Promise.all([...livePaths.map(file => writeFile(file, live)), ...replayPaths.map(file => writeFile(file, replay))])
+  const index = parseExperimentEvidenceIndex(JSON.stringify({
+    schemaVersion: 'helix.factorio.experiment-index/v1', experimentId: 'failed-replay-v1',
+    reportRef: 'report', candidateRef: 'candidate', overlayRef: 'overlay',
+    pairs: [{
+      caseId: 'case-0', category: 'raw-material', weight: 1,
+      baseline: { success: false, replayPassed: true, cost: 2, latencyMs: 2 },
+      candidate: { success: false, replayPassed: true, cost: 2, latencyMs: 2 },
+      baselineEvidencePath: livePaths[0], candidateEvidencePath: livePaths[1],
+      baselineReplayPath: replayPaths[0], candidateReplayPath: replayPaths[1],
+    }],
+  }))
+  await assert.doesNotReject(() => writeExperimentAnalysis({ index, root: temp, thresholds: { minPairs: 1 } }))
+})

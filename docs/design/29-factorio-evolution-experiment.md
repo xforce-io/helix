@@ -74,7 +74,7 @@ flowchart LR
 
 1. HRCA 发布 immutable policy/suite；candidate generation 仅读取 source run projection。
 2. evaluator 为每个 case resolve profile，依次运行两臂并冻结证据 refs。
-3. 重放两臂，统计器仅接受一致且 replay-pass 的 pairs。
+3. 重放两臂，统计器仅接受一致且 replay-reproduced 的 pairs；任务失败只要可确定性重放，仍是有效负例，不能因 `S2.live-success` 为假而从统计中消失。
 4. 写入 experiment manifest、pair index、analysis；任何缺证据/门禁失败的结果不可 promotion。
 5. 人工审批同时验证既有 RCS report 与 experiment analysis，才使 exact overlay 对 external live 可见。
 

@@ -29,7 +29,8 @@ Protocol:
 
 Call factorio.reset() exactly once, in the first cell. Never reset again after it succeeds.
 
-Use execute_cell for action, not prose. Never ask the harness to provide a solution.`,
+Use execute_cell for action, not prose. Never ask the harness to provide a solution.
+Every response must contain exactly one non-empty execute_cell call. Do not emit analysis, planning, or prose outside that call. Keep each cell and any factorio.step program concise (under 4,000 characters), and print only compact metrics rather than full observations.`,
     taskNarrativeTemplate:
       'Create an automatic iron-ore factory that produces at least 16 iron-ore per 60 in-game seconds.',
     protocolRules: [

@@ -209,6 +209,48 @@ test('模型重试仍保留最近真实反馈，且大对象不进入模型上�
   assert.ok(retryContext.length < 25_000, `retry context was ${retryContext.length} bytes`)
 })
 
+test('被截断的空 tool call 只触发重试，不丢弃已记录环境状态', async () => {
+  const resetCode = 'factorio.reset()'
+  const stepCode = 'factorio.step("print(1)")'
+  const malformed: ModelResponse = {
+    content: [{ type: 'tool_use', id: 'truncated-call', name: 'execute_cell', input: {} }],
+    toolCalls: [{ id: 'truncated-call', name: 'execute_cell', input: {} }],
+    finishReason: 'max_tokens',
+  }
+  const port = new FakePort([
+    toolResponse('reset-call', resetCode),
+    malformed,
+    toolResponse('step-call', stepCode),
+  ])
+  const assembled = assembleTestRun()
+  let execution = 0
+  const result = await runHarness({
+    runId: 'run',
+    episodeId: 'run:episode:0',
+    pins: assembled.pins,
+    port,
+    budget: { deadlineAt: 10_000 },
+    control: { deadlineAt: 10_000 },
+    frozenHarness: assembled.frozen,
+    controlPlaneText: assembled.controlPlaneText,
+    controlPlaneContentHash: assembled.controlPlaneContentHash,
+    execute: async input => {
+      execution += 1
+      return record(
+        input.code,
+        input.cellId,
+        execution,
+        execution === 1 ? 'reset' : 'step',
+        execution === 2,
+      )
+    },
+  })
+  assert.equal(result.termination, 'verifier_succeeded')
+  assert.equal(result.projection.cells.length, 2)
+  assert.equal(port.requests.length, 3)
+  assert.match(JSON.stringify(port.requests[2]), /did not submit a valid non-empty/)
+})
+
 test('真正的策略越权会立即终止模型循环', async () => {
   const code = 'factorio.step("eval(1)")'
   const port = new FakePort([toolResponse('policy-call', code)])

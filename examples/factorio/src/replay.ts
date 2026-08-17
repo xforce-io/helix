@@ -22,7 +22,10 @@ import {
   summarizeFinalization,
   TRACE_ROOT,
   writeEvidence,
+  parseLiveEvidenceText,
 } from './cli-common.js'
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
 import {
   formFactorioAvailableCatalogRefs,
   openFactorioReplayHost,
@@ -520,7 +523,13 @@ export async function replayChildRun(args: {
 async function main(): Promise<void> {
   const runId = argument('--run')
   if (!runId) throw new Error('missing --run <run-id>')
-  const live = await readLiveEvidence(runId)
+  const liveEvidencePath = argument('--live-evidence')
+  if (liveEvidencePath !== undefined && !path.isAbsolute(liveEvidencePath)) {
+    throw new Error('--live-evidence must be an absolute path')
+  }
+  const live = liveEvidencePath === undefined
+    ? await readLiveEvidence(runId)
+    : parseLiveEvidenceText(await fs.readFile(liveEvidencePath, 'utf8'))
   const legacyGate = rejectLegacyPins(live.pins as { harness?: string; bindingSet?: string; kernelProtocol?: string })
   if (!legacyGate.passed) {
     throw new Error(
