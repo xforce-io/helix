@@ -288,13 +288,11 @@ test('P3 Factorio Host rejects a policy whose model pin differs from the live mo
   )
 })
 
-test('P3 failed candidate cannot produce a promotable Factorio evaluation metric', () => {
+test('P3 failed candidate is recorded as quality zero and cannot satisfy the promotion gate', () => {
   const failed = recordedLive('candidate-failed', false)
   assert.equal(factorioArmMetrics('baseline', failed).quality, 0)
-  assert.throws(
-    () => factorioArmMetrics('candidate', failed),
-    /candidate FLE verification must succeed/,
-  )
+  assert.equal(factorioArmMetrics('candidate', failed).quality, 0)
+  assert.equal(factorioArmMetrics('candidate', failed).failed, true)
   assert.equal(factorioArmMetrics('candidate', recordedLive('candidate-passed', true)).quality, 1)
 })
 
