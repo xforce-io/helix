@@ -395,13 +395,13 @@ function createLiveFactorioRunArm(
     // The evaluator route has already admitted the candidate pins. The actual
     // FLE execution replays exactly those frozen pins and never invokes the
     // ordinary external `live --overlay` route.
-    preflightLive()
+    const experimentProfile = resolveFactorioExperimentCase(evaluationCase)
+    preflightLive(undefined, undefined, experimentProfile)
     const assembled = assembleFactorioRunFromFrozenPins({
       bundle,
-      basePins: pins(model),
+      basePins: pins(model, experimentProfile),
       harnessPins,
     })
-    const experimentProfile = resolveFactorioExperimentCase(evaluationCase)
     const result = await runAssembledFactorioLive({
       assembled,
       model,

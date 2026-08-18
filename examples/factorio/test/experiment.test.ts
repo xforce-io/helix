@@ -3,15 +3,30 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { resolveFactorioExperimentCase } from '../src/experiment/cases.js'
+import {
+  FACTORIO_EXPERIMENT_TASKS,
+  resolveFactorioExperimentCase,
+} from '../src/experiment/cases.js'
 import { analyzeFactorioExperiment } from '../src/experiment/statistics.js'
 import { parseExperimentEvidenceIndex, writeExperimentAnalysis } from '../src/experiment/evidence.js'
 
 test('experiment case selects a real task and a configured FLE slot', () => {
   const value = resolveFactorioExperimentCase({ inputRef: 'factorio.throughput/iron-plate/v1', seed: 3 }, { slots: 4 })
   assert.equal(value.taskId, 'iron_plate_throughput')
+  assert.equal(value.taskDigest, 'sha256:0e111447aae5e5d6ba9430a0219b70f632ac4f99b63c2f25101b8663b072aee2')
   assert.equal(value.slot, 3)
   assert.throws(() => resolveFactorioExperimentCase({ inputRef: 'factorio.throughput/iron-plate/v1', seed: 4 }, { slots: 4 }), /configured slot/)
+})
+
+test('experiment task catalog contains only FLE-verified task identities', () => {
+  assert.deepEqual(Object.keys(FACTORIO_EXPERIMENT_TASKS).sort(), [
+    'factorio.throughput/iron-ore/v1',
+    'factorio.throughput/iron-plate/v1',
+  ])
+  assert.throws(
+    () => resolveFactorioExperimentCase({ inputRef: 'factorio.throughput/electronic-circuit/v1', seed: 0 }),
+    /not registered/,
+  )
 })
 
 test('analysis only accepts a significant 10pp paired improvement with replay', () => {

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Event } from 'milkie/dist/trace/types.js'
-import { preflightLive, type CommandRunner } from '../src/cli-common.js'
+import { pins, preflightLive, type CommandRunner } from '../src/cli-common.js'
+import { resolveFactorioExperimentCase } from '../src/experiment/cases.js'
 import { JsonLineProcess } from '../src/line-process.js'
 import { LiveCellExecutor } from '../src/live-executor.js'
 import { boundedObservation } from '../src/live-executor.js'
@@ -101,6 +102,21 @@ test('preflight 校验精确容器身份、镜像、握手和任务固定版本'
     () => preflightLive(wrongImage, {}),
     /image mismatch/,
   )
+})
+
+test('preflight 和 pins 绑定受支持的 iron-plate 任务身份', () => {
+  const task = resolveFactorioExperimentCase({ inputRef: 'factorio.throughput/iron-plate/v1', seed: 0 })
+  const calls: string[][] = []
+  const runner: CommandRunner = (file, args) => {
+    calls.push([file, ...args])
+    if (file === 'docker') return JSON.stringify({ running: true, image: 'factoriotools/factorio:2.0.73', label: 'true' })
+    return JSON.stringify({ fle: '0.4.3', taskId: task.taskId, taskDigest: task.taskDigest, rconAuthenticated: true })
+  }
+  preflightLive(runner, {}, task)
+  const issued = pins('test-model', task)
+  assert.equal(issued.taskId, task.taskId)
+  assert.equal(issued.taskDigest, task.taskDigest)
+  assert.deepEqual(calls[1]?.slice(-2), ['--task-id', 'iron_plate_throughput'])
 })
 
 test('Trace 前置断言失败时绝不能封账 success Outcome', () => {

@@ -18,16 +18,14 @@ from fle.env.gym_env.action import Action
 PROTOCOL_VERSION = "2"
 TASK_ID = "iron_ore_throughput"
 EXPERIMENT_TASKS = {
-    "factorio.throughput/iron-ore/v1": "iron_ore_throughput",
-    "factorio.throughput/iron-plate/v1": "iron_plate_throughput",
-    "factorio.throughput/iron-gear-wheel/v1": "iron_gear_wheel_throughput",
-    "factorio.throughput/inserter/v1": "inserter_throughput",
-    "factorio.throughput/electronic-circuit/v1": "electronic_circuit_throughput",
-    "factorio.throughput/steel-plate/v1": "steel_plate_throughput",
-    "factorio.throughput/advanced-circuit/v1": "advanced_circuit_throughput",
-    "factorio.throughput/engine-unit/v1": "engine_unit_throughput",
-    "factorio.throughput/automation-science-pack/v1": "automation_science_pack_throughput",
-    "factorio.throughput/logistics-science-pack/v1": "logistics_science_pack_throughput",
+    "factorio.throughput/iron-ore/v1": {
+        "taskId": "iron_ore_throughput",
+        "taskDigest": "sha256:c50497c8548123494e48376e51ace2dd4f66717421de3a9f930d5833b6572f44",
+    },
+    "factorio.throughput/iron-plate/v1": {
+        "taskId": "iron_plate_throughput",
+        "taskDigest": "sha256:0e111447aae5e5d6ba9430a0219b70f632ac4f99b63c2f25101b8663b072aee2",
+    },
 }
 MAX_ACTION_CHARS = 10_000
 ALLOWED_CALLS = {
@@ -208,15 +206,19 @@ def experiment_task_and_slot(params: dict[str, Any]) -> tuple[str, int]:
         return TASK_ID, 0
     if not isinstance(profile, dict):
         raise ValueError("EXPERIMENT_PROFILE_INVALID: profile must be an object")
-    task_id = EXPERIMENT_TASKS.get(profile.get("inputRef"))
+    task = EXPERIMENT_TASKS.get(profile.get("inputRef"))
     slot = profile.get("slot")
-    if task_id is None or profile.get("taskId") != task_id:
+    if (
+        task is None
+        or profile.get("taskId") != task["taskId"]
+        or profile.get("taskDigest") != task["taskDigest"]
+    ):
         raise ValueError("EXPERIMENT_PROFILE_INVALID: task is not registered")
     if not isinstance(slot, int) or isinstance(slot, bool) or slot < 0 or profile.get("seed") != slot:
         raise ValueError("EXPERIMENT_PROFILE_INVALID: slot/seed is invalid")
     if not isinstance(profile.get("digest"), str) or not profile["digest"]:
         raise ValueError("EXPERIMENT_PROFILE_INVALID: digest is required")
-    return task_id, slot
+    return task["taskId"], slot
 
 
 def main() -> None:

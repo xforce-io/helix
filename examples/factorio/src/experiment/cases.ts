@@ -2,55 +2,39 @@
 
 import { canonicalJson, digest } from '../canonical.js'
 
-type TaskDefinition = { taskId: string; category: string; instruction: string }
+export type FactorioExperimentTask = {
+  taskId: string
+  taskDigest: string
+  category: string
+  instruction: string
+}
 
-export const FACTORIO_EXPERIMENT_TASKS: Record<string, TaskDefinition> = {
+/**
+ * Closed set of FLE tasks whose registry definition has been independently
+ * fingerprinted in the pinned FLE 0.4.3 environment.  Listing a task here is
+ * an identity contract, not a best-effort Gym discovery result.
+ */
+export const FACTORIO_EXPERIMENT_TASKS: Record<string, FactorioExperimentTask> = {
   'factorio.throughput/iron-ore/v1': {
     taskId: 'iron_ore_throughput', category: 'raw-material',
+    taskDigest: 'sha256:c50497c8548123494e48376e51ace2dd4f66717421de3a9f930d5833b6572f44',
     instruction: 'Solve the FLE iron_ore_throughput task through model-owned persistent IPython cells.',
   },
   'factorio.throughput/iron-plate/v1': {
     taskId: 'iron_plate_throughput', category: 'raw-material',
+    taskDigest: 'sha256:0e111447aae5e5d6ba9430a0219b70f632ac4f99b63c2f25101b8663b072aee2',
     instruction: 'Solve the FLE iron_plate_throughput task through model-owned persistent IPython cells.',
   },
-  'factorio.throughput/iron-gear-wheel/v1': {
-    taskId: 'iron_gear_wheel_throughput', category: 'intermediate',
-    instruction: 'Solve the FLE iron_gear_wheel_throughput task through model-owned persistent IPython cells.',
-  },
-  'factorio.throughput/inserter/v1': {
-    taskId: 'inserter_throughput', category: 'intermediate',
-    instruction: 'Solve the FLE inserter_throughput task through model-owned persistent IPython cells.',
-  },
-  'factorio.throughput/electronic-circuit/v1': {
-    taskId: 'electronic_circuit_throughput', category: 'intermediate',
-    instruction: 'Solve the FLE electronic_circuit_throughput task through model-owned persistent IPython cells.',
-  },
-  'factorio.throughput/steel-plate/v1': {
-    taskId: 'steel_plate_throughput', category: 'advanced',
-    instruction: 'Solve the FLE steel_plate_throughput task through model-owned persistent IPython cells.',
-  },
-  'factorio.throughput/advanced-circuit/v1': {
-    taskId: 'advanced_circuit_throughput', category: 'advanced',
-    instruction: 'Solve the FLE advanced_circuit_throughput task through model-owned persistent IPython cells.',
-  },
-  'factorio.throughput/engine-unit/v1': {
-    taskId: 'engine_unit_throughput', category: 'advanced',
-    instruction: 'Solve the FLE engine_unit_throughput task through model-owned persistent IPython cells.',
-  },
-  'factorio.throughput/automation-science-pack/v1': {
-    taskId: 'automation_science_pack_throughput', category: 'science',
-    instruction: 'Solve the FLE automation_science_pack_throughput task through model-owned persistent IPython cells.',
-  },
-  'factorio.throughput/logistics-science-pack/v1': {
-    taskId: 'logistics_science_pack_throughput', category: 'science',
-    instruction: 'Solve the FLE logistics_science_pack_throughput task through model-owned persistent IPython cells.',
-  },
 }
+
+export const DEFAULT_FACTORIO_EXPERIMENT_TASK =
+  FACTORIO_EXPERIMENT_TASKS['factorio.throughput/iron-ore/v1']!
 
 export type FactorioExperimentProfile = {
   schemaVersion: 'helix.factorio.experiment-profile/v2'
   inputRef: string
   taskId: string
+  taskDigest: string
   category: string
   instruction: string
   /** A pre-provisioned FLE container slot, never an invented random seed. */
@@ -84,6 +68,7 @@ export function resolveFactorioExperimentCase(
     schemaVersion: 'helix.factorio.experiment-profile/v2' as const,
     inputRef: entry.inputRef as string,
     taskId: task.taskId,
+    taskDigest: task.taskDigest,
     category: task.category,
     instruction: task.instruction,
     slot: entry.seed as number,

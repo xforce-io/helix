@@ -286,7 +286,8 @@ export interface RunPins {
   milkie: string
   fle: '0.4.3'
   factorioServer: '2.0.73'
-  taskId: 'iron_ore_throughput'
+  /** Closed task identity issued by the Factorio experiment task registry. */
+  taskId: string
   taskDigest: string
   kernelMemoryBytes: number
   kernelCpuSeconds: number
@@ -361,7 +362,7 @@ export interface LiveEvidence {
   traceFile: string
   objectStore: string
   finalProjection: EpisodeProjection
-  experimentProfile?: { inputRef: string; taskId: string; category: string; instruction: string; slot: number; seed: number; digest: string }
+  experimentProfile?: { inputRef: string; taskId: string; taskDigest: string; category: string; instruction: string; slot: number; seed: number; digest: string }
   finalization: FinalizationSummary
   /** Observed started/attached child run ids (success LLM + C2 + agents). */
   childRunIds: string[]
