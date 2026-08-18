@@ -23,10 +23,12 @@ kernel = load("kernel_worker")
 
 class ActionPolicyTest(unittest.TestCase):
     def test_experiment_profile_selects_registered_task_and_slot(self) -> None:
-        profile = {"inputRef": "factorio.throughput/iron-plate/v1", "taskId": "iron_plate_throughput", "slot": 0, "seed": 0, "digest": "sha256:test"}
+        profile = {"inputRef": "factorio.throughput/iron-plate/v1", "taskId": "iron_plate_throughput", "taskDigest": "sha256:0e111447aae5e5d6ba9430a0219b70f632ac4f99b63c2f25101b8663b072aee2", "slot": 0, "seed": 0, "digest": "sha256:test"}
         self.assertEqual(bridge.experiment_task_and_slot({"experimentProfile": profile}), ("iron_plate_throughput", 0))
         with self.assertRaisesRegex(ValueError, "EXPERIMENT_PROFILE_INVALID"):
             bridge.experiment_task_and_slot({"experimentProfile": {**profile, "taskId": "iron_ore_throughput"}})
+        with self.assertRaisesRegex(ValueError, "EXPERIMENT_PROFILE_INVALID"):
+            bridge.experiment_task_and_slot({"experimentProfile": {**profile, "taskDigest": "sha256:forged"}})
 
     def test_public_program_is_allowed(self) -> None:
         bridge.validate_action(

@@ -122,6 +122,13 @@ export async function runAssembledFactorioLive(
   process.once('SIGINT', cancel)
   process.once('SIGTERM', cancel)
   const runPins = assembled.pins
+  if (
+    input.experimentProfile !== undefined &&
+    (runPins.taskId !== input.experimentProfile.taskId ||
+      runPins.taskDigest !== input.experimentProfile.taskDigest)
+  ) {
+    throw new Error('experiment profile task identity must match frozen run pins')
+  }
   const sessionAsyncEnabled = runPins.sessionAsyncVersion === '1'
 
   const traceStore = new JsonlEventStore(TRACE_ROOT)

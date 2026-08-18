@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import argparse
 from typing import Any
 
 from factorio_rcon import RCONClient
 from fle.env.gym_env.registry import get_environment_info
 
-TASK_ID = "iron_ore_throughput"
+DEFAULT_TASK_ID = "iron_ore_throughput"
 
 
 def canonical_json(value: Any) -> str:
@@ -25,9 +26,13 @@ def digest(value: Any) -> str:
 
 
 def main() -> None:
-    task = get_environment_info(TASK_ID)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task-id", default=DEFAULT_TASK_ID)
+    args = parser.parse_args()
+    task_id = args.task_id
+    task = get_environment_info(task_id)
     if task is None:
-        raise RuntimeError(f"FLE did not register required task: {TASK_ID}")
+        raise RuntimeError(f"FLE did not register required task: {task_id}")
     authenticated = False
     try:
         client = RCONClient("127.0.0.1", 27000, "factorio", timeout=2.0)
@@ -39,7 +44,7 @@ def main() -> None:
         json.dumps(
             {
                 "fle": importlib.metadata.version("factorio-learning-environment"),
-                "taskId": TASK_ID,
+                "taskId": task_id,
                 "taskDigest": digest(task),
                 "rconAuthenticated": authenticated,
             },

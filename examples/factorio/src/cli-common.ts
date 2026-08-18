@@ -8,6 +8,10 @@ import {
 } from '../../../src/harness/index.js'
 import { canonicalJson } from './canonical.js'
 import { parseFactorioEvidenceJsonText } from './evidence-json.js'
+import {
+  DEFAULT_FACTORIO_EXPERIMENT_TASK,
+  type FactorioExperimentTask,
+} from './experiment/cases.js'
 import type {
   FinalizationSummary,
   LiveEvidence,
@@ -47,8 +51,8 @@ export {
   MIN_RESERVE_TOKENS,
 } from './recursive-model.js'
 
-export const TASK_DIGEST =
-  'sha256:c50497c8548123494e48376e51ace2dd4f66717421de3a9f930d5833b6572f44'
+/** @deprecated Use the task-bound identity carried in RunPins/profile. */
+export const TASK_DIGEST = DEFAULT_FACTORIO_EXPERIMENT_TASK.taskDigest
 const FACTORIO_CONTAINER = 'helix-factorio_0'
 const FACTORIO_IMAGE = 'factoriotools/factorio:2.0.73'
 
@@ -63,13 +67,19 @@ export function argument(name: string): string | undefined {
   return value && !value.startsWith('--') ? value : undefined
 }
 
-export function pins(model: string): RunPins {
+export function pins(
+  model: string,
+  task: FactorioExperimentTask = DEFAULT_FACTORIO_EXPERIMENT_TASK,
+): RunPins {
   // Default #5-compatible path (no session-async pin).
-  return pinsV4(model)
+  return pinsV4(model, task)
 }
 
 /** Issue #7 session-async pins (harness v5 + sessionAsyncVersion). */
-export function pinsSessionAsync(model: string): RunPins {
+export function pinsSessionAsync(
+  model: string,
+  task: FactorioExperimentTask = DEFAULT_FACTORIO_EXPERIMENT_TASK,
+): RunPins {
   return {
     model,
     harness: 'factorio-rlm/v5',
@@ -80,8 +90,8 @@ export function pinsSessionAsync(model: string): RunPins {
     milkie: MILKIE_COMMIT,
     fle: '0.4.3',
     factorioServer: '2.0.73',
-    taskId: 'iron_ore_throughput',
-    taskDigest: TASK_DIGEST,
+    taskId: task.taskId,
+    taskDigest: task.taskDigest,
     kernelMemoryBytes: 1_073_741_824,
     kernelCpuSeconds: 600,
     sessionAsyncVersion: '1',
@@ -89,7 +99,10 @@ export function pinsSessionAsync(model: string): RunPins {
 }
 
 /** v4 pins factory retained for legacy gate tests. */
-export function pinsV4(model: string): RunPins {
+export function pinsV4(
+  model: string,
+  task: FactorioExperimentTask = DEFAULT_FACTORIO_EXPERIMENT_TASK,
+): RunPins {
   return {
     model,
     harness: 'factorio-rlm/v4',
@@ -100,8 +113,8 @@ export function pinsV4(model: string): RunPins {
     milkie: MILKIE_COMMIT,
     fle: '0.4.3',
     factorioServer: '2.0.73',
-    taskId: 'iron_ore_throughput',
-    taskDigest: TASK_DIGEST,
+    taskId: task.taskId,
+    taskDigest: task.taskDigest,
     kernelMemoryBytes: 1_073_741_824,
     kernelCpuSeconds: 600,
   }
@@ -110,6 +123,7 @@ export function pinsV4(model: string): RunPins {
 export function preflightLive(
   runner: CommandRunner = defaultRunner,
   env: NodeJS.ProcessEnv = process.env,
+  task: FactorioExperimentTask = DEFAULT_FACTORIO_EXPERIMENT_TASK,
 ): void {
   // Model credentials are resolved by connectModel (HELIX_LLM_*), not preflight.
   const inspected = JSON.parse(
@@ -134,12 +148,12 @@ export function preflightLive(
   const python =
     env['HELIX_FACTORIO_PYTHON'] ?? path.resolve('examples/factorio/.venv/bin/python')
   const facts = JSON.parse(
-    runner(python, [path.resolve('examples/factorio/workers/preflight_worker.py')]),
+    runner(python, [path.resolve('examples/factorio/workers/preflight_worker.py'), '--task-id', task.taskId]),
   ) as Record<string, unknown>
   if (facts['fle'] !== '0.4.3') {
     throw new Error(`FLE version mismatch: expected 0.4.3, got ${String(facts['fle'])}`)
   }
-  if (facts['taskId'] !== 'iron_ore_throughput' || facts['taskDigest'] !== TASK_DIGEST) {
+  if (facts['taskId'] !== task.taskId || facts['taskDigest'] !== task.taskDigest) {
     throw new Error('FLE task identity or digest mismatch')
   }
   if (facts['rconAuthenticated'] !== true) {
