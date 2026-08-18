@@ -363,6 +363,8 @@ export interface LiveEvidence {
   objectStore: string
   finalProjection: EpisodeProjection
   experimentProfile?: { inputRef: string; taskId: string; taskDigest: string; category: string; instruction: string; slot: number; seed: number; digest: string }
+  freezeId?: string
+  contentDigest?: string
   finalization: FinalizationSummary
   /** Observed started/attached child run ids (success LLM + C2 + agents). */
   childRunIds: string[]

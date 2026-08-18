@@ -27,6 +27,17 @@ import {
   preflightLive,
 } from './cli-common.js'
 import {
+  assertFreezeIntegrity,
+  assertIsolatedExperimentStateRoot,
+  assertProjectionHasNoHoldout,
+  assertRcsDigests,
+  digestPolicyPayload,
+  experimentFreezePath,
+  parseFactorioExperimentFreeze,
+  type FactorioExperimentFreeze,
+  type SuiteProjectionCase,
+} from './experiment/freeze.js'
+import {
   assembleFactorioRunFromFrozenPins,
   createFactorioHostBundle,
   formFactorioAvailableCatalogRefs,
@@ -226,8 +237,57 @@ export function extractFactorioEvaluationMetrics(live: LiveEvidence): {
   }
 }
 
-/** CLI entry: `createRefinementCommandHost` is the name helix refine --host-module loads. */
+function parseArtifactRef(ref: string): { kind: string; id: string; contentHash: string } | undefined {
+  const match = /^(policy|suite):([^@]+)@[0-9]+#([0-9a-f]+)$/.exec(ref)
+  if (match === null || match[1] === undefined || match[2] === undefined || match[3] === undefined) return undefined
+  return { kind: match[1], id: match[2], contentHash: match[3] }
+}
+
+function readPublishedOfficialArtifacts(
+  rcs: RefinementControlStore,
+  freeze: FactorioExperimentFreeze,
+  policy: unknown,
+): {
+  suiteId: string
+  suiteDigest: string
+  policyId: string
+  policyDigest: string
+  suiteCases: SuiteProjectionCase[]
+} {
+  const policyDigest = digestPolicyPayload(policy)
+  const artifacts = rcs.listArtifacts()
+  const suite = artifacts.map(entry => ({ entry, parsed: parseArtifactRef(entry.ref) }))
+    .find(item => item.parsed?.kind === 'suite' && item.parsed.id === freeze.suiteId)
+  const policyArtifact = artifacts.map(entry => ({ entry, parsed: parseArtifactRef(entry.ref) }))
+    .find(item => item.parsed?.kind === 'policy' && item.parsed.id === freeze.policyId)
+  if (suite?.parsed === undefined || policyArtifact?.parsed === undefined) {
+    throw new Error('official experiment generate requires published RCS suite and policy')
+  }
+  const payload = suite.entry.payload as { cases?: SuiteProjectionCase[] }
+  if (!Array.isArray(payload.cases)) throw new Error('published suite has no cases')
+  if (policyDigest !== freeze.policyDigest) throw new Error('policy identity does not match freeze')
+  return {
+    suiteId: suite.parsed.id,
+    suiteDigest: suite.parsed.contentHash,
+    policyId: policyArtifact.parsed.id,
+    policyDigest,
+    suiteCases: payload.cases,
+  }
+}
 export function createRefinementCommandHost(): RefinementCommandHost {
+  const explicit = process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT']
+  if (explicit !== undefined && explicit.trim() !== '') {
+    const root = assertIsolatedExperimentStateRoot(explicit)
+    const freeze = parseFactorioExperimentFreeze(
+      fs.readFileSync(experimentFreezePath(root), 'utf8'),
+      EXAMPLE_BUNDLE,
+    )
+    return createFactorioRefinementCommandHost({
+      rootDir: root,
+      requireOfficialFreeze: true,
+      officialFreeze: freeze,
+    })
+  }
   return createFactorioRefinementCommandHost({ rootDir: HARNESS_STATE_ROOT })
 }
 
@@ -247,6 +307,8 @@ export function createFactorioRefinementCommandHost(options: {
   generationModel?: string
   runArm?: FactorioRunArm
   readLive?: (runId: string) => LiveEvidence | undefined
+  requireOfficialFreeze?: boolean
+  officialFreeze?: FactorioExperimentFreeze
 } = {}): RefinementCommandHost {
   const bundle = options.rcs === undefined
     ? createFactorioHostBundle(options.rootDir === undefined ? {} : { rootDir: options.rootDir })
@@ -274,7 +336,7 @@ export function createFactorioRefinementCommandHost(options: {
     throw new Error('Factorio refinement Host requires a connected model projection')
   }
   const innerPort = options.innerPort ?? createFactorioGenerationPort(connected)
-  const runArm = options.runArm ?? createLiveFactorioRunArm(bundle, generationModel)
+  const runArm = options.runArm ?? createLiveFactorioRunArm(bundle, generationModel, options.officialFreeze)
   const baseAdapter = createMilkieRefinementAdapter({
     rcs,
     availableCatalogRefs: formFactorioAvailableCatalogRefs('factorio-rlm/v4'),
@@ -282,12 +344,14 @@ export function createFactorioRefinementCommandHost(options: {
     innerPort,
     generationRunRef: 'factorio-refinement-generation',
     generationModel,
-    // Do not catch projection errors: an unreadable or non-terminal P1 run
-    // must prevent the IOPort call rather than generate from empty evidence.
-    projectGenerationInput: (sourceRunRefs) => projectFactorioGenerationInput(
-      sourceRunRefs,
-      options.readLive === undefined ? {} : { readLive: options.readLive },
-    ),
+    projectGenerationInput: (sourceRunRefs) => {
+      const projection = projectFactorioGenerationInput(
+        sourceRunRefs,
+        options.readLive === undefined ? {} : { readLive: options.readLive },
+      )
+      if (options.requireOfficialFreeze) assertProjectionHasNoHoldout(projection)
+      return projection
+    },
     extractorDigest: FACTORIO_EXTRACTOR_DIGEST,
     sharedPins: { runner: 'factorio', model: generationModel },
     runArm,
@@ -295,6 +359,24 @@ export function createFactorioRefinementCommandHost(options: {
   const adapter: RefinementCommandHost['adapter'] = {
     ...baseAdapter,
     async generate(input) {
+      if (options.requireOfficialFreeze) {
+        assertIsolatedExperimentStateRoot()
+        if (options.officialFreeze === undefined) {
+          throw new Error('official experiment generate requires a published freeze')
+        }
+        assertFreezeIntegrity(options.officialFreeze, EXAMPLE_BUNDLE)
+        const published = readPublishedOfficialArtifacts(rcs, options.officialFreeze, input.policy)
+        assertRcsDigests({
+          freeze: options.officialFreeze,
+          suiteId: published.suiteId,
+          suiteDigest: published.suiteDigest,
+          policyId: published.policyId,
+          policyDigest: published.policyDigest,
+          suiteCases: published.suiteCases,
+        })
+      } else if (options.officialFreeze !== undefined) {
+        assertFreezeIntegrity(options.officialFreeze, EXAMPLE_BUNDLE)
+      }
       // A signed policy is candidate provenance. Do not allow it to claim a
       // model different from the one the Factorio Host will actually call.
       if (input.policy.generation.model !== generationModel) {
@@ -387,15 +469,25 @@ export function factorioArmMetrics(
 function createLiveFactorioRunArm(
   bundle: FactorioHostBundle | undefined,
   model: string,
+  freeze?: FactorioExperimentFreeze,
 ): FactorioRunArm {
   return async ({ arm, case: evaluationCase, reservedRunRef, pins: harnessPins }) => {
     if (bundle === undefined) {
       throw new Error('live Factorio evaluation requires a Host-created RCS bundle')
     }
-    // The evaluator route has already admitted the candidate pins. The actual
-    // FLE execution replays exactly those frozen pins and never invokes the
-    // ordinary external `live --overlay` route.
     const experimentProfile = resolveFactorioExperimentCase(evaluationCase)
+    if (freeze !== undefined) {
+      const row = freeze.matrix.find(item => item.caseId === evaluationCase.caseId)
+      if (row === undefined) throw new Error(`evaluation case is not in the official freeze matrix: ${evaluationCase.caseId}`)
+      if (
+        experimentProfile.inputRef !== row.inputRef ||
+        experimentProfile.taskId !== row.taskId ||
+        experimentProfile.taskDigest !== row.taskDigest ||
+        experimentProfile.slot !== row.slot
+      ) {
+        throw new Error(`evaluation case identity drifts from freeze matrix: ${evaluationCase.caseId}`)
+      }
+    }
     preflightLive(undefined, undefined, experimentProfile)
     const assembled = assembleFactorioRunFromFrozenPins({
       bundle,
@@ -408,7 +500,11 @@ function createLiveFactorioRunArm(
       runId: reservedRunRef,
       evidencePath: path.join(ARTIFACT_ROOT, 'evals', reservedRunRef, 'live.json'),
       experimentProfile,
+      ...(freeze === undefined ? {} : { freezeId: freeze.freezeId, contentDigest: freeze.contentDigest }),
     })
+    if (freeze !== undefined && result.evidence.pins.fle !== '0.4.3') {
+      throw new Error('official evaluation arm pins.fle must be 0.4.3')
+    }
     return {
       runRef: reservedRunRef,
       ...factorioArmMetrics(arm, result.evidence),
