@@ -3,7 +3,13 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { EXAMPLE_BUNDLE } from '../refinement-host.js'
 import { parseExperimentEvidenceIndex, writeExperimentAnalysis } from './evidence.js'
+import {
+  assertIsolatedExperimentStateRoot,
+  experimentFreezePath,
+  parseFactorioExperimentFreeze,
+} from './freeze.js'
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name)
@@ -15,11 +21,17 @@ export async function analyzeExperimentCli(): Promise<void> {
   const indexPath = argument('--index')
   if (indexPath === undefined) throw new Error('usage: factorio:experiment -- analyze --index <experiment-index.json>')
   if (process.argv[2] !== 'analyze') throw new Error('only the analyze subcommand is supported')
+  const stateRoot = assertIsolatedExperimentStateRoot()
+  const freeze = parseFactorioExperimentFreeze(
+    await fs.readFile(experimentFreezePath(stateRoot), 'utf8'),
+    EXAMPLE_BUNDLE,
+  )
   const index = parseExperimentEvidenceIndex(await fs.readFile(path.resolve(indexPath), 'utf8'))
-  const result = await writeExperimentAnalysis({ index })
+  const result = await writeExperimentAnalysis({ index, freeze })
   console.log(JSON.stringify({
     experimentId: result.artifact.experimentId,
     analysisPath: result.path,
+    mode: result.artifact.mode,
     verdict: result.artifact.analysis.verdict,
     successRateDelta: result.artifact.analysis.successRateDelta,
     confidenceInterval: result.artifact.analysis.confidenceInterval,

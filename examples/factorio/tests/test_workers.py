@@ -30,6 +30,31 @@ class ActionPolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "EXPERIMENT_PROFILE_INVALID"):
             bridge.experiment_task_and_slot({"experimentProfile": {**profile, "taskDigest": "sha256:forged"}})
 
+    def test_official_electronic_circuit_is_registered(self) -> None:
+        profile = {
+            "inputRef": "factorio.throughput/electronic-circuit/v1",
+            "taskId": "electronic_circuit_throughput",
+            "taskDigest": "sha256:8545de22fd179a544f28758dddb35561d9f1f0d8daff72a103421c75df44fb9e",
+            "slot": 1,
+            "seed": 1,
+            "digest": "sha256:test",
+        }
+        self.assertEqual(bridge.experiment_task_and_slot({"experimentProfile": profile}), ("electronic_circuit_throughput", 1))
+
+    def test_official_slot_must_be_configured_pool(self) -> None:
+        profile = {
+            "inputRef": "factorio.throughput/iron-plate/v1",
+            "taskId": "iron_plate_throughput",
+            "taskDigest": "sha256:0e111447aae5e5d6ba9430a0219b70f632ac4f99b63c2f25101b8663b072aee2",
+            "slot": 4,
+            "seed": 4,
+            "digest": "sha256:test",
+        }
+        with self.assertRaisesRegex(ValueError, "slot/seed is invalid"):
+            bridge.experiment_task_and_slot({"experimentProfile": profile})
+        with self.assertRaisesRegex(ValueError, "slot/seed is invalid"):
+            bridge.experiment_task_and_slot({"experimentProfile": {**profile, "slot": 1, "seed": True}})
+
     def test_public_program_is_allowed(self) -> None:
         bridge.validate_action(
             "pos = nearest(Resource.IronOre)\n"

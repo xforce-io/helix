@@ -99,6 +99,8 @@ export type RunAssembledFactorioLiveInput = {
   /** Optional injected gateway (tests); default path uses connectModel generate. */
   gateway?: IModelGateway
   experimentProfile?: FactorioExperimentProfile
+  freezeId?: string
+  contentDigest?: string
 }
 
 export type RunAssembledFactorioLiveResult = {
@@ -473,6 +475,8 @@ export async function runAssembledFactorioLive(
     objectStore: OBJECT_ROOT,
     finalProjection: projection,
     ...(input.experimentProfile === undefined ? {} : { experimentProfile: input.experimentProfile }),
+    ...(input.freezeId === undefined ? {} : { freezeId: input.freezeId }),
+    ...(input.contentDigest === undefined ? {} : { contentDigest: input.contentDigest }),
     finalization,
     childRunIds: evidenceChildRunIds,
     ...(evidenceNonReplayable.length > 0

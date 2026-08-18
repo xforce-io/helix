@@ -26,6 +26,38 @@ EXPERIMENT_TASKS = {
         "taskId": "iron_plate_throughput",
         "taskDigest": "sha256:0e111447aae5e5d6ba9430a0219b70f632ac4f99b63c2f25101b8663b072aee2",
     },
+    "factorio.throughput/steel-plate/v1": {
+        "taskId": "steel_plate_throughput",
+        "taskDigest": "sha256:400afd8c4f5682d1f37eeab296d7c30db1f9dde86b6bd0f91860c871715db0a4",
+    },
+    "factorio.throughput/iron-gear-wheel/v1": {
+        "taskId": "iron_gear_wheel_throughput",
+        "taskDigest": "sha256:940eacfd19e445c9c263cb4d9574503b4a5aa26fa41f936bb4b68325c980fed4",
+    },
+    "factorio.throughput/electronic-circuit/v1": {
+        "taskId": "electronic_circuit_throughput",
+        "taskDigest": "sha256:8545de22fd179a544f28758dddb35561d9f1f0d8daff72a103421c75df44fb9e",
+    },
+    "factorio.throughput/inserter/v1": {
+        "taskId": "inserter_throughput",
+        "taskDigest": "sha256:327e7fe71bfef355a06bf8c473ecdb0d9e407f02110c7e3da52621c8ec2b05e4",
+    },
+    "factorio.throughput/automation-science-pack/v1": {
+        "taskId": "automation_science_pack_throughput",
+        "taskDigest": "sha256:7155384ed5f17c36252724b3d05b3373646b30b103883777df08297da04866f1",
+    },
+    "factorio.throughput/logistics-science-pack/v1": {
+        "taskId": "logistics_science_pack_throughput",
+        "taskDigest": "sha256:5b172e2f7a533cc3d5639e60ce844826ab0027e5b5426494b8ae4e9182b3e287",
+    },
+    "factorio.throughput/stone-wall/v1": {
+        "taskId": "stone_wall_throughput",
+        "taskDigest": "sha256:f377930fa5456ed6a0350b4fe52fc7a945a63e05676a029612ed1ac833319818",
+    },
+    "factorio.throughput/plastic-bar/v1": {
+        "taskId": "plastic_bar_throughput",
+        "taskDigest": "sha256:5c5d8c8c8f2e23d117a8ce3edad12d00f0f55ddb3eff6ef5ddf5ce4d36edfef0",
+    },
 }
 MAX_ACTION_CHARS = 10_000
 ALLOWED_CALLS = {
@@ -208,13 +240,17 @@ def experiment_task_and_slot(params: dict[str, Any]) -> tuple[str, int]:
         raise ValueError("EXPERIMENT_PROFILE_INVALID: profile must be an object")
     task = EXPERIMENT_TASKS.get(profile.get("inputRef"))
     slot = profile.get("slot")
+    seed = profile.get("seed")
     if (
         task is None
         or profile.get("taskId") != task["taskId"]
         or profile.get("taskDigest") != task["taskDigest"]
     ):
         raise ValueError("EXPERIMENT_PROFILE_INVALID: task is not registered")
-    if not isinstance(slot, int) or isinstance(slot, bool) or slot < 0 or profile.get("seed") != slot:
+    if (
+        not isinstance(slot, int) or isinstance(slot, bool) or slot < 0 or slot >= 4
+        or not isinstance(seed, int) or isinstance(seed, bool) or seed != slot
+    ):
         raise ValueError("EXPERIMENT_PROFILE_INVALID: slot/seed is invalid")
     if not isinstance(profile.get("digest"), str) or not profile["digest"]:
         raise ValueError("EXPERIMENT_PROFILE_INVALID: digest is required")

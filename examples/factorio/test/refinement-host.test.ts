@@ -13,6 +13,7 @@ import {
 } from '../src/harness-host.js'
 import {
   createFactorioRefinementCommandHost,
+  createRefinementCommandHost,
   createFactorioFixtureAssertion,
   EXAMPLE_BUNDLE,
   extractGeneratedOverlayJson,
@@ -511,4 +512,52 @@ test('P3 evaluator finalization ID is deterministic and bounded for reserved run
   assert.equal(id.length, 78)
   assert.equal(id, factorioFinalizationId(runRef))
   assert.equal(factorioFinalizationId('factorio-p1'), 'factorio-p1:eval:fle:v2')
+})
+
+test('official generate refuses to run without a published freeze', async () => {
+  const previous = process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT']
+  const root = mkdtempSync(path.join(tmpdir(), 'helix-factorio-official-generate-'))
+  process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT'] = root
+  try {
+    const bundle = createFactorioHostBundle({ rootDir: root })
+    const host = createFactorioRefinementCommandHost({
+      rcs: bundle.rcs,
+      generationModel: 'fixture-recorded-model',
+      requireOfficialFreeze: true,
+      innerPort: stubPort(JSON.stringify({
+        schemaVersion: 'helix.harness-overlay/v1',
+        baseBaselineRef: bundle.defaultBaselineRef,
+        changes: { taskNarrativeTemplate: 'should not generate' },
+      })),
+      readLive: runId => recordedLive(runId, false),
+    })
+    const workflow = new RefinementWorkflow(host.rcs, host.adapter)
+    const policyRef = publishFactorioFixtureConfiguration(workflow, 'official-missing-freeze', 'policy', policy)
+    await assert.rejects(
+      workflow.propose({
+        proposalId: 'official-missing-freeze',
+        sourceRunRefs: ['recorded-p1'],
+        baselineRef: bundle.defaultBaselineRef,
+        policyRef,
+      }),
+      /requires a published freeze/,
+    )
+  } finally {
+    if (previous === undefined) delete process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT']
+    else process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT'] = previous
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('production host enables official freeze when experiment state root is set', () => {
+  const previous = process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT']
+  const root = mkdtempSync(path.join(tmpdir(), 'helix-factorio-official-host-'))
+  process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT'] = root
+  try {
+    assert.throws(() => createRefinementCommandHost(), /ENOENT|experiment freeze/)
+  } finally {
+    if (previous === undefined) delete process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT']
+    else process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT'] = previous
+    rmSync(root, { recursive: true, force: true })
+  }
 })

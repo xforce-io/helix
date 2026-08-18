@@ -5,15 +5,26 @@ import path from 'node:path'
 
 import { canonicalJson, digest } from '../canonical.js'
 import { ARTIFACT_ROOT, LIVE_WALL_TIMEOUT_MS } from '../cli-common.js'
+import { resolveFactorioExperimentCase } from './cases.js'
+import {
+  assertFreezeIntegrity,
+  classifyOfficialIndex,
+  type FactorioExperimentFreeze,
+} from './freeze.js'
 import {
   analyzeFactorioExperiment,
   type ExperimentAnalysis,
   type ExperimentArm,
   type ExperimentPair,
-  type ExperimentThresholds,
 } from './statistics.js'
 
 export type ExperimentPairEvidence = ExperimentPair & {
+  inputRef: string
+  taskId: string
+  taskDigest: string
+  slot: number
+  seed: number
+  repetitionIndex: number
   baselineEvidencePath: string
   candidateEvidencePath: string
   baselineReplayPath: string
@@ -23,6 +34,8 @@ export type ExperimentPairEvidence = ExperimentPair & {
 export type ExperimentEvidenceIndex = {
   schemaVersion: 'helix.factorio.experiment-index/v1'
   experimentId: string
+  freezeId: string
+  contentDigest: string
   /** RCS report identity is opaque to the example analysis code. */
   reportRef: string
   candidateRef: string
@@ -34,11 +47,15 @@ export type ExperimentAnalysisArtifact = {
   schemaVersion: 'helix.factorio.experiment-analysis/v1'
   experimentId: string
   indexDigest: string
+  freezeId: string
+  contentDigest: string
+  mode: 'official' | 'smoke'
   reportRef: string
   candidateRef: string
   overlayRef: string
   analysis: ExperimentAnalysis
 }
+
 
 function isSafeExperimentId(value: string): boolean {
   return /^[a-z0-9][a-z0-9-]{0,63}$/.test(value)
@@ -76,8 +93,20 @@ function readArm(value: unknown, label: string): ExperimentPair['baseline'] {
 function readPair(value: unknown, index: number): ExperimentPairEvidence {
   const pair = asRecord(value)
   if (pair === undefined) throw new Error(`pairs[${index}] must be an object`)
+  const slot = requireFinite(pair.slot, `pairs[${index}].slot`)
+  const seed = requireFinite(pair.seed, `pairs[${index}].seed`)
+  const repetitionIndex = requireFinite(pair.repetitionIndex, `pairs[${index}].repetitionIndex`)
+  if (!Number.isSafeInteger(slot) || !Number.isSafeInteger(seed) || !Number.isSafeInteger(repetitionIndex)) {
+    throw new Error(`pairs[${index}] slot, seed, and repetitionIndex must be integers`)
+  }
   return {
     caseId: requireString(pair.caseId, `pairs[${index}].caseId`),
+    inputRef: requireString(pair.inputRef, `pairs[${index}].inputRef`),
+    taskId: requireString(pair.taskId, `pairs[${index}].taskId`),
+    taskDigest: requireString(pair.taskDigest, `pairs[${index}].taskDigest`),
+    slot,
+    seed,
+    repetitionIndex,
     category: requireString(pair.category, `pairs[${index}].category`),
     weight: requireFinite(pair.weight, `pairs[${index}].weight`),
     baseline: readArm(pair.baseline, `pairs[${index}].baseline`),
@@ -126,7 +155,10 @@ async function verifyArmEvidence(input: {
   livePath: string
   replayPath: string
   label: string
-}): Promise<void> {
+  pair: ExperimentPairEvidence
+  freezeId: string
+  contentDigest: string
+}): Promise<{ model: string; fle: unknown; taskId: string; taskDigest: string }> {
   if (!path.isAbsolute(input.livePath) || !path.isAbsolute(input.replayPath)) {
     throw new Error(`${input.label} evidence paths must be absolute`)
   }
@@ -144,14 +176,38 @@ async function verifyArmEvidence(input: {
   const replayRecord = asRecord(replay)
   const projection = liveRecord === undefined ? undefined : asRecord(liveRecord.finalProjection)
   const budget = liveRecord === undefined ? undefined : asRecord(liveRecord.budget)
+  const pins = liveRecord === undefined ? undefined : asRecord(liveRecord.pins)
+  const profile = liveRecord === undefined ? undefined : asRecord(liveRecord.experimentProfile)
   if (
-    projection === undefined || budget === undefined ||
+    liveRecord === undefined ||
+    typeof liveRecord.schema !== 'string' || !liveRecord.schema.startsWith('helix.factorio.live/') ||
+    typeof liveRecord.runId !== 'string' ||
+    liveRecord.freezeId !== input.freezeId ||
+    liveRecord.contentDigest !== input.contentDigest ||
+    projection === undefined || budget === undefined || pins === undefined || profile === undefined ||
     typeof asRecord(projection.verification)?.success !== 'boolean' ||
     typeof projection.modelCallCount !== 'number' ||
     typeof budget.deadlineAt !== 'number' || typeof budget.remainingWallMsAtEnd !== 'number' ||
+    typeof pins.model !== 'string' || pins.fle !== '0.4.3' ||
+    typeof pins.taskId !== 'string' || typeof pins.taskDigest !== 'string' ||
+    typeof profile.digest !== 'string' ||
     replayRecord === undefined || typeof replayRecord.verdict !== 'string'
   ) {
     throw new Error(`${input.label} evidence schema is incomplete`)
+  }
+  const expectedProfile = resolveFactorioExperimentCase({ inputRef: input.pair.inputRef, seed: input.pair.slot })
+  if (
+    pins.taskId !== input.pair.taskId ||
+    pins.taskDigest !== input.pair.taskDigest ||
+    profile.inputRef !== input.pair.inputRef ||
+    profile.taskId !== input.pair.taskId ||
+    profile.taskDigest !== input.pair.taskDigest ||
+    profile.slot !== input.pair.slot ||
+    profile.seed !== input.pair.seed ||
+    profile.category !== input.pair.category ||
+    profile.digest !== expectedProfile.digest
+  ) {
+    throw new Error(`${input.label} live identity does not match freeze matrix`)
   }
   const success = asRecord(projection.verification)!.success as boolean
   assertSameNumber(projection.modelCallCount, input.arm.cost, `${input.label}.cost`)
@@ -164,13 +220,22 @@ async function verifyArmEvidence(input: {
   if (replayReproduced(replayRecord) !== input.arm.replayPassed) {
     throw new Error(`${input.label}.replayPassed differs from immutable replay evidence`)
   }
+  return { model: pins.model, fle: pins.fle, taskId: pins.taskId, taskDigest: pins.taskDigest }
 }
 
-async function verifyPairEvidence(pair: ExperimentPairEvidence): Promise<void> {
-  await Promise.all([
-    verifyArmEvidence({ arm: pair.baseline, livePath: pair.baselineEvidencePath, replayPath: pair.baselineReplayPath, label: `${pair.caseId}.baseline` }),
-    verifyArmEvidence({ arm: pair.candidate, livePath: pair.candidateEvidencePath, replayPath: pair.candidateReplayPath, label: `${pair.caseId}.candidate` }),
+async function verifyPairEvidence(pair: ExperimentPairEvidence, freezeId: string, contentDigest: string): Promise<void> {
+  const [baseline, candidate] = await Promise.all([
+    verifyArmEvidence({ arm: pair.baseline, livePath: pair.baselineEvidencePath, replayPath: pair.baselineReplayPath, label: `${pair.caseId}.baseline`, pair, freezeId, contentDigest }),
+    verifyArmEvidence({ arm: pair.candidate, livePath: pair.candidateEvidencePath, replayPath: pair.candidateReplayPath, label: `${pair.caseId}.candidate`, pair, freezeId, contentDigest }),
   ])
+  if (
+    baseline.model !== candidate.model ||
+    baseline.fle !== candidate.fle ||
+    baseline.taskId !== candidate.taskId ||
+    baseline.taskDigest !== candidate.taskDigest
+  ) {
+    throw new Error(`${pair.caseId} baseline/candidate shared pins are asymmetric`)
+  }
 }
 
 /** Closed parser: hand-edited or incomplete pair indexes never reach statistics. */
@@ -204,6 +269,8 @@ export function parseExperimentEvidenceIndex(text: string): ExperimentEvidenceIn
   return {
     schemaVersion: 'helix.factorio.experiment-index/v1',
     experimentId,
+    freezeId: requireString(index.freezeId, 'freezeId'),
+    contentDigest: requireString(index.contentDigest, 'contentDigest'),
     reportRef: requireString(index.reportRef, 'reportRef'),
     candidateRef: requireString(index.candidateRef, 'candidateRef'),
     overlayRef: requireString(index.overlayRef, 'overlayRef'),
@@ -217,19 +284,34 @@ export function parseExperimentEvidenceIndex(text: string): ExperimentEvidenceIn
  */
 export async function writeExperimentAnalysis(input: {
   index: ExperimentEvidenceIndex
-  thresholds?: Partial<ExperimentThresholds>
+  freeze: FactorioExperimentFreeze
   root?: string
 }): Promise<{ artifact: ExperimentAnalysisArtifact; path: string }> {
-  await Promise.all(input.index.pairs.map(verifyPairEvidence))
-  const analysis = analyzeFactorioExperiment(input.index.pairs, input.thresholds)
+  if (input.index.freezeId !== input.freeze.freezeId || input.index.contentDigest !== input.freeze.contentDigest) {
+    throw new Error('experiment index freeze identity does not match freeze')
+  }
+  assertFreezeIntegrity(input.freeze)
+  const mode = classifyOfficialIndex(input.index.pairs, input.freeze)
+  await Promise.all(input.index.pairs.map(pair => verifyPairEvidence(pair, input.index.freezeId, input.index.contentDigest)))
+  const analysis = analyzeFactorioExperiment(input.index.pairs, input.freeze.thresholds)
+  const official = mode === 'official'
+    ? analysis
+    : {
+        ...analysis,
+        verdict: 'indeterminate' as const,
+        failures: [...analysis.failures.filter(item => item !== 'PAIR_COUNT_BELOW_MINIMUM'), 'NOT_OFFICIAL_MATRIX'],
+      }
   const artifact: ExperimentAnalysisArtifact = {
     schemaVersion: 'helix.factorio.experiment-analysis/v1',
     experimentId: input.index.experimentId,
     indexDigest: digest(canonicalJson(input.index)),
+    freezeId: input.freeze.freezeId,
+    contentDigest: input.freeze.contentDigest,
+    mode,
     reportRef: input.index.reportRef,
     candidateRef: input.index.candidateRef,
     overlayRef: input.index.overlayRef,
-    analysis,
+    analysis: official,
   }
   const root = path.resolve(input.root ?? path.join(ARTIFACT_ROOT, 'experiments'))
   const output = path.join(root, input.index.experimentId, 'analysis.json')
