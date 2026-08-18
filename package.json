@@ -41,7 +41,7 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
-    "milkie": "https://github.com/xforce-io/milkie/archive/fec0ebfb99f57e04a0812fc74fd01f85e9b81b57.tar.gz"
+    "milkie": "https://github.com/xforce-io/milkie/archive/efef4dc4714d0e1fb84c3220ad218d4f85393aaf.tar.gz"
   },
   "overrides": {
     "uuid": "^11.1.1"
