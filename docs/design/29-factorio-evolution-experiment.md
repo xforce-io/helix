@@ -2,128 +2,133 @@
 
 - Issue: #29
 - 状态: Approved
-- 最后更新: 2026-08-17
+- 最后更新: 2026-08-22
 
 ## 1. 背景
 
-Factorio P3 已能将 recorded run 生成的 overlay 送入 baseline/candidate 双臂评估，并在人工批准后使其可被后续 live 显式选择。但现有真实评估 arm 未把 Suite case 的 `inputRef`、`seed` 传入 FLE；同时，早期 policy 可以在两臂均失败时仍通过。因此它证明了 control-plane 闭环，不证明候选 harness 提高真实任务完成率。
+Factorio P3 已能由 recorded run 生成 overlay、运行 baseline/candidate 两臂、经人工审批后供下一轮 live 显式选择。#39 又将正式实验收敛为有不可变身份的 10 个认证任务、4 个 FLE 槽位和每变体 4 个模型重复，共 160 对。
 
-2026-08-17 的真实 bridge 探测确认，FLE 的 `run_idx` 是 Docker 容器槽位而不是随机 seed：单容器集群对 `run_idx=17` 明确拒绝。修订方案将 `inputRef` 映射为白名单 FLE task，`seed` 严格限制为已启动的 0–3 容器槽位；它们分别提供真实 task variation 与独立 instance slot。
+首个正式候选未达到成功率与统计门槛；后续 r4 筛选也已读取该矩阵的一部分。把这些正式 case 的失败轨迹作为下一候选的生成输入，再用相同任务身份复验，会使 holdout 泄漏，不能支持“候选提升”的结论。
 
-本设计只为 Factorio example 建立锁定 holdout 的成对实验。RCS 继续拥有 Policy、Suite、Candidate、Report、Decision 和 overlay 可见性；milkie 继续拥有 run、Trace、Replay、lineage 与 outcome。本设计不改变它们的权威边界。
+本修订在 Factorio example 内引入开发任务闭集与正式 holdout 闭集的隔离生命周期。RCS 仍拥有 policy、suite、candidate、decision 与 overlay 可见性；milkie 仍拥有 run、trace、replay、lineage 与 outcome。本设计不修改这些权威边界，也不改 `src/refinement/` 通用契约。
 
 ## 2. 名词解释
 
 | 词 | 定义 |
 |---|---|
-| 实验 case | 一个 immutable `inputRef`、FLE `seed`、权重和类别构成的 holdout 实例。|
-| pair | 同一 case、相同共享执行 pins 下的一个 baseline run 和一个 candidate run。|
-| 实验计划 | 绑定 policy、suite、candidate、门禁阈值和实验 id 的 Factorio-only manifest。|
-| 成功率差 | 所有有效 pair 上 `candidate.success - baseline.success` 的加权均值。|
+| 开发任务 | 只用于收集 source run、诊断与生成候选的认证 `inputRef` 闭集。|
+| 正式 holdout | 候选生成前尚不可被 generation projection、candidate 或其 source run 读取的认证任务闭集。|
+| 污染 | 某 candidate 的生成输入直接或间接含有其正式 holdout 的 `inputRef`、`taskId`、`taskDigest`、instruction、feedback 或该矩阵 evidence。|
+| 实验 case | 一条 `{caseId, inputRef, taskId, taskDigest, slot, seed, repetitionIndex, category, weight}` 冻结行。|
+| pair | 同一 case、相同共享 execution pins 下的 baseline 和 candidate 两个 arm。|
+| 正式 freeze | 签名绑定 suite/policy digest、认证 catalog snapshot、160 行 canonical matrix 与统计门槛的不可变记录。|
 
 ## 3. 设计目标与非目标
 
-- **目标**：让 `inputRef`、`seed` 真正决定 bridge reset 使用的 FLE instance；记录两臂证据和可复算统计结论。
-- **目标**：只在 replay、成功率、统计显著性、成本、时延和分层回归均满足时允许人工 promotion。
-- **目标**：将代码和实验模板限制在 `examples/factorio/`，不向通用 refinement 层添加契约。
-- **非目标**：公共 SDK、自动 promotion、在线 A/B 流量分配、任意 FLE task，或将真实 holdout 正文/凭证提交到仓库。
+- **目标**：候选只从开发任务的有界、可追溯 source run 投影学习；开发与正式 holdout 的身份闭集严格互斥。
+- **目标**：候选生成完成后才发布新的正式 freeze，并只以该 freeze 的完整 160 对 live/replay evidence 得出 terminal 分析结论。
+- **目标**：使任务叙事模板根据当前 reset 的任务和 action capabilities 选择资源、recipe、机器与规模，而不是复用某个历史任务的产品、坐标或产线。
+- **非目标**：降低 160-pair、成功率、CI、McNemar、成本、延迟、失败率、类别回归或人工 promotion 门槛。
+- **非目标**：把筛选或正式失败 case 回灌给同一 candidate；自动 promotion；开放任意 FLE task；向通用 refinement 层添加协议。
 
 ## 4. 能力与功能设计
 
 ### 4.1 UI / UX
 
-N/A。本设计通过现有 refinement CLI 和机器可读 artifacts 交付；操作员按 `examples/factorio/experiments/success-rate-v1/README.md` 执行。
+N/A。操作员通过现有 refinement CLI、Factorio-only artifacts 与 `success-rate-v2` 实验脚本执行。空态为无认证开发/holdout catalog；错态为身份交集、未发布 freeze、签名/digest 漂移或 generation projection 泄漏，均拒绝且不调用模型。
 
-### 4.2 锁定的成对评估
+### 4.2 开发与 holdout 生命周期
 
-Suite 的 `inputRef` 选择真实、白名单 FLE task profile；`seed` 只能在已配置的四槽容器池中使用并传为 FLE `run_idx`。不得把任意 seed 解释为 `run_idx`。未登记 input、未配置槽位、重复的实验 pair、或候选生成阶段读取 suite 输入均 fail closed。
-
-baseline/candidate 对同一 profile 分别运行，除 harness selection/pins 外共享 model、FLE、Factorio server、task digest、资源预算、超时和 profile digest。调度顺序由 `pairIndex` 决定 AB/BA，证据中记录该顺序。任何 arm 的 live、Replay、profile digest 或 shared-pin 不一致会使整个实验 `indeterminate`。
+1. 认证开发任务与正式 holdout 任务。两者的 `inputRef`、`taskId`、`taskDigest` 必须双向不相交；下一次正式 freeze 标识为 `success-rate-v2`。
+2. 在开发任务运行可重放的 baseline/诊断 run；只将这些 run 的有界 feedback 投影给 generation 模型。
+3. 先发布不含正式 catalog/matrix 的不可变 generation policy，再生成并 admission 一个 candidate。模板不得命名固定目标、recipe、吞吐量、坐标或历史工厂布局；实际 run 必须以当前 reset 信息和 allowlist 决策。
+4. **在 candidate terminal 后**发布新的 suite 和正式 freeze；freeze 必须绑定该 candidate 的 generation policy 的精确 digest。生成路径无法读取其 catalog snapshot 或 matrix。
+5. 对 freeze 的全部 160 pair 跑 baseline/candidate live，随后对全部 320 arm replay；canonical index 与 freeze 全等后才可分析。
+6. 仅 `passed` 的正式 analysis 且 candidate/overlay/freeze 精确匹配时，才成为既有人工 promotion 的必要前置。
 
 ### 4.3 统计与 promotion 门禁
 
-主指标是最终 FLE verifier 的二元结果，`quality=1|0`。分析 artifact 对有效 pair 计算加权成功率差、discordant pair 数、精确单侧 McNemar p 值、paired bootstrap 95% CI、成本/延迟比及按类别的成功率差。
-
-正式 policy 采用：成功率差至少 10pp、CI 下界大于 0、p 小于 0.05、失败率不升、成本不超过 1.2 倍、延迟不超过 1.5 倍、每个关键类别回归不超过 5pp。统计结论只作为 Factorio Host 的人工 promotion 前置条件；现有 RCS 权限/签名/visibility gate 仍必须通过。
+主指标为 FLE verifier 的二元结果。正式分析锁定：160 有效 pair、成功率差 ≥10pp、paired bootstrap 95% CI 下界 > 0、单侧 McNemar `p < 0.05`、失败率不升、成本 ≤1.2×、延迟 ≤1.5×，且每个冻结关键类别回归 ≤5pp。任何 replay、pins、freeze 引用或矩阵身份缺失时 fail closed；小样本仅是 smoke，必须 `indeterminate`，不可 promotion。
 
 ## 5. 设计思路与折衷
 
-- 选择在 example 内实现 resolver、statistics 与 evidence index，而不是修改 `src/refinement/`。当前没有第二个场景可证明通用统计契约。
-- 选择 opaque input ref 加 Host registry，而不是在 Suite 内内嵌任务正文。前者保留可审计 identity，又不使 holdout 流入 generation prompt。
-- 选择配对检验和 CI，而不是仅采用 aggregate delta。前者控制同一 task/seed 的难度差及模型随机性；代价是需记录更完整的 pair 证据。
-- 不把单次运行标为提升；正式实验需要 40 个任务变体乘 4 个独立重复。首次实现的 fixture 使用小样本，只验证计算与 fail-closed 行为，不能作为质量证明。
+- **选择独立认证任务闭集，而不是同一 profile 仅换 repetition。** 后者实施简单，但候选已从同一任务身份的筛选反馈中学习，不能作为无污染的提升证明。
+- **选择 candidate 生成后冻结 holdout，而不是先冻结后再把其失败反馈加入下一轮。** 前者保留评估独立性；后者会把调参结果伪装成验证。
+- **选择 recipe-driven 的任务无关叙事，而不是把一个成功 factory layout 固化为模板。** 固定坐标/采矿-熔炼链对单任务有效，但不覆盖电路、装配、科学或油链任务。
+- **放弃在通用 policy schema 加入实验字段。** Factorio-only freeze 已能绑定统计与身份；没有第二个 domain 证明通用化价值。
 
 ## 6. 架构设计
 
 ### 6.1 逻辑分层
 
 ```mermaid
-flowchart LR
-  S["Trusted Suite: opaque inputRef + seed"] --> R["Factorio case resolver"]
-  R --> B["Bridge reset profile"]
-  R --> E["Paired evaluator"]
-  E --> L["baseline/candidate Live + Replay"]
-  L --> A["Experiment analysis artifact"]
-  A --> G["Host promotion precondition"]
-  G --> P["Existing RCS manual promotion"]
+flowchart TD
+  D[认证开发 catalog] --> DR[开发 recorded runs]
+  DR --> GP[有界 generation projection]
+  GP --> C[Candidate / task-agnostic overlay]
+  C --> F[新 suite + policy + 正式 freeze]
+  H[认证 holdout catalog] --> F
+  F --> E[160 paired live arms]
+  E --> R[320 replay arms]
+  R --> A[canonical index + official analysis]
+  A -->|passed and exact binding| M[现有人工 promotion]
+  A -->|failed / indeterminate| X[external route 拒绝]
 ```
-
-`src/refinement/` 调用的 `FactorioRunArm` 仍只接收普通 case 和 frozen pins；Factorio Host 将普通 case 转为 profile、执行并返回既有 `EvaluationArmResult`。analysis 不改写 RCS report，它以 refs/hash 只读引用 report 和 canonical live/replay evidence。
 
 ### 6.2 核心业务流程
 
-1. HRCA 发布 immutable policy/suite；candidate generation 仅读取 source run projection。
-2. evaluator 为每个 case resolve profile，依次运行两臂并冻结证据 refs。
-3. 重放两臂，统计器仅接受一致且 replay-reproduced 的 pairs；任务失败只要可确定性重放，仍是有效负例，不能因 `S2.live-success` 为假而从统计中消失。
-4. 写入 experiment manifest、pair index、analysis；任何缺证据/门禁失败的结果不可 promotion。
-5. 人工审批同时验证既有 RCS report 与 experiment analysis，才使 exact overlay 对 external live 可见。
+开发 catalog 的 resolver 与正式 catalog 的 resolver 分别构造 profile；二者仅共享 FLE adapter 和 closed-schema 验证。generation host 在读取 source run 前检查该 run 的 profile 属于开发 catalog，并检查投影不含正式身份。freeze 发布时检查两 catalog 双向不交并把正式 catalog snapshot 写入 freeze。
+
+评估 host 只接受正式 matrix 中的 case，按其 slot 调度两臂，记录同一 model/FLE/预算 pins。分析器先校验每行 evidence/replay 与 freeze，再运行统计。promotion host 读取 official analysis，拒绝分析非 official、非 passed 或 candidate/overlay/freeze 不匹配的请求。
 
 ## 7. 模块设计
 
 | 模块 | 职责 | 非职责 |
 |---|---|---|
-| `examples/factorio/src/experiment/cases.ts` | 受限 inputRef/seed registry、profile digest | 读取 holdout 正文、修改 Suite |
-| `examples/factorio/src/experiment/statistics.ts` | pair 聚合、McNemar、bootstrap CI、分层结果、门禁 | 运行模型/FLE、promotion |
-| `examples/factorio/src/experiment/evidence.ts` | manifest/index、hash/路径验证 | 复制或重写 raw evidence |
-| `refinement-host.ts` | case profile 传递、真实 arm 接线、analysis 前置 | 通用 refinement schema |
-| bridge/kernel/executor | 将首次 reset profile 原样传至 FLE，记录 profile digest | 解释 policy 或统计结论 |
+| `experiment/cases.ts` | 开发/正式 catalog、profile identity、双向不交校验 | 扫描 Gym 或读取 holdout 正文 |
+| `experiment/freeze.ts` | 正式 catalog snapshot、matrix、suite/policy digest 与隔离校验 | 保存开发 feedback |
+| `refinement-host.ts` | 只投影开发 source run；生成任务无关 overlay；正式 promotion 前置 | 改通用 RCS schema |
+| `experiment/evidence.ts` | canonical pair/replay 校验和 official analysis binding | 生成或修补 raw evidence |
+| `experiments/*` 脚本 | 开发 run、smoke、正式 160 对与 replay 的可复现编排 | 在证据不足时宣布通过 |
 
 ## 8. API / CLI 设计
 
-没有公共 npm API。Factorio-only CLI 为：
+没有公共 npm API。正式分析入口保持：
 
 ```text
-npm run factorio:experiment -- analyze --experiment <id> --report <evaluation-report-ref>
+npm run factorio:experiment -- analyze --index <experiment-index.json>
 ```
 
-成功输出 `{experimentId, analysisPath, verdict, successRateDelta, confidenceInterval, mcnemarPValue}`。只接受已完成的 RCS evaluation report；读/写路径固定在 `artifacts/factorio/experiments/<id>/`。
+正式评测调用必须显式设置隔离的 `HELIX_FACTORIO_HARNESS_STATE_ROOT`。candidate generation 只接受带认证开发 profile 的 source run；正式 freeze 只接受新的 `success-rate-v2` catalog 和完整 matrix，且不复用已被候选读取的旧 freeze。未提供 index、index 非 freeze 的完整 matrix、或 catalog 分区校验失败时非 0 退出且不写 promotion 相关 verdict。
 
 ## 9. 边界考虑
 
-- resolver、bridge、evidence parser 均使用 closed schema；unknown inputRef、非法 seed、路径逃逸与 hash drift 拒绝。
-- 每个 run 是独立 FLE episode；pair 不共享 state，AB/BA 顺序记录而不改变 profile。
-- provider 若不能 pin sampling seed，重复编号仍进入 profile/证据，统计把它视为独立重复；model identity/连接投影必须在两臂相同。
-- bootstrap CI 使用固定、由 experiment manifest 导出的随机序列；没有足够有效 pair 时 verdict 为 `indeterminate`。
-- credentials、holdout 正文、完整 endpoint 绝不写入 plan、evidence index 或分析 artifact。
+- 开发与正式 identity 的任一交集、别名映射到同一 `taskId`/`taskDigest`、或 source run 缺失可验证 profile 时，candidate generation 失败。
+- 任务模板只能提供方法性策略；运行时的 target、recipe、资源 patch、位置与规模来自当前 reset/allowlist。不得将 player inventory 视为自动吞吐。
+- 单个 slot 内不得并发；每个 pair 是独立 FLE episode。live/replay 可确定失败是有效负例，不能删除以改善统计。
+- 凭证、完整 endpoint、holdout instruction、正式 catalog snapshot 与正式 evidence 不得进入 candidate prompt 或开发 artifacts。
+- 若无足够独立认证任务，停止实验，不以旧正式矩阵或已读取 case 替代。
 
 ## 10. 迁移 / 兼容 / 回滚
 
-现有 P1/P2/P3 默认路径保持不变；实验为 opt-in。旧 report 没有 experiment analysis 时不能用于新实验 promotion，但仍可按原记录 replay。回滚可删除 `examples/factorio/src/experiment/` 和 opt-in CLI，不改写 RCS、overlay 或旧 evidence。
+既有 `success-rate-v1` freeze、r4 筛选证据和失败 analysis 保留为只读历史，不能绑定下一候选 promotion。默认 P1/P2/P3 路径保持不变。回滚时停止发布新的正式 freeze 和 candidate；保留 catalog snapshot、evidence 与 analysis 以支持历史 replay，不删除或重写旧结论。
 
 ## 11. 测试计划
 
-- **E2E**：在真实 FLE + 已配置模型环境中，对冻结 suite 运行成对 baseline/candidate，输出 canonical evidence 与 analysis；满足门禁时人工 promote，任一门禁失败时 external route 仍拒绝。环境不可用时明确报告，不能用 fixture 代替。
-- **Integration**：验证 `inputRef/seed → reset profile → bridge run_idx`，两臂 shared pins/profile digest 对称，raw live/replay evidence 通过 index 校验。
-- **Unit**：closed case schema、统计计算、边界 p/CI、类别回归、缺失/篡改 evidence、path/hash fail-closed。
+- **E2E**：开发 run 只来自开发 catalog；candidate terminal 后发布正式 freeze；完整 160 对的两臂 live/replay 都可读，official analysis 给出可判定 `passed` 或 `failed`。身份泄漏或任一 arm replay 失败时 external route 不可选择 overlay。
+- **Integration**：开发/正式 catalog 的 `inputRef`、`taskId`、`taskDigest` 交集拒绝；开发 source run 伪称正式/未知 profile 拒绝；generation projection 不含正式 identity；新 candidate 不可使用旧 freeze 的 analysis promotion。
+- **Unit**：task-agnostic 生成指令包含 recipe discovery、动态 resource/placement/scale 规则并禁止固定拓扑；freeze/catalog 双向不交；官方 analysis 的 exact candidate/overlay/freeze binding。
 
 ## 12. 开放问题 / 决策记录
 
-- FLE 当前 P1 默认仍固定为 `iron_ore_throughput`；实验路径通过 Host-private profile 覆盖 bridge task 与模型可见 task 叙事，默认 P1 pins 保持不变。
-- 当前 refinement policy schema 不承载统计字段；首版将其放在 Factorio experiment plan 和人工 promotion precondition，避免提前改变通用契约。
+- 2026-08-22：#29 comment `5380908886` 的 L1 已获用户 **Approved**。本文件为该批准后的 L2 事实源。
+- 需要先认证足量且与正式集不相交的 FLE task profiles；认证失败不能以未认证名称或已读取 holdout 替代。
+- r4 是失败筛选，不能作为下一候选 source run，也不能进入正式统计或 promotion。
 
 ## 13. 关联
 
-- Issue: #29
-- L1: Issue #29 comment
-- P3: `docs/design/13-harness-refinement-toolchain.md`
+- Issue: https://github.com/xforce-io/helix/issues/29
+- L1: https://github.com/xforce-io/helix/issues/29#issuecomment-5380908886
+- 历史正式矩阵: `docs/design/39-official-success-rate-matrix.md`（仅 `success-rate-v1` 历史证据）
+- v2 操作模板: `examples/factorio/experiments/success-rate-v2/README.md`
 - 实现: `examples/factorio/src/experiment/`

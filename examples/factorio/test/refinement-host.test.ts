@@ -27,6 +27,7 @@ import {
 import { reconstructFactorioReplayHarness } from '../src/replay.js'
 import { factorioFinalizationId } from '../src/live.js'
 import type { LiveEvidence } from '../src/types.js'
+import { resolveFactorioExperimentCase } from '../src/experiment/cases.js'
 import type { IIOPort } from 'milkie/dist/runtime/IOPort.js'
 import { RefinementError } from '../../../src/refinement/errors.js'
 import {
@@ -39,7 +40,14 @@ import { signConfiguration } from '../../../src/refinement/trust.js'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '../../..')
 
-function recordedLive(runId: string, success: boolean): LiveEvidence {
+function recordedLive(
+  runId: string,
+  success: boolean,
+  inputRef?: string,
+): LiveEvidence {
+  const experimentProfile = inputRef === undefined
+    ? undefined
+    : resolveFactorioExperimentCase({ inputRef, slot: 0 })
   return {
     schema: 'helix.factorio.live/v3',
     verdict: success ? 'pass' : 'fail',
@@ -89,6 +97,7 @@ function recordedLive(runId: string, success: boolean): LiveEvidence {
     },
     childRunIds: [],
     checks: [],
+    ...(experimentProfile === undefined ? {} : { experimentProfile }),
   }
 }
 
@@ -255,6 +264,43 @@ test('P3 invalid recorded input fails closed before any generation IOPort call',
   assert.equal(invocations, 0)
 })
 
+test('P3 development-only Host rejects a holdout source before generation IOPort call', async () => {
+  const bundle = createFactorioHostBundle()
+  let invocations = 0
+  const host = createFactorioRefinementCommandHost({
+    rcs: bundle.rcs,
+    generationModel: 'fixture-recorded-model',
+    requireDevelopmentProfiles: true,
+    innerPort: {
+      ...stubPort('{}'),
+      async invokeLLM() {
+        invocations += 1
+        return { content: [], toolCalls: [] }
+      },
+    },
+    readLive: () => recordedLive('holdout-source', false, 'factorio.throughput/advanced-circuit/v1'),
+    runArm: ({ reservedRunRef }) => ({
+      runRef: reservedRunRef,
+      quality: 0,
+      cost: 0,
+      latencyMs: 0,
+      failed: true,
+    }),
+  })
+  const workflow = new RefinementWorkflow(host.rcs, host.adapter)
+  const policyRef = publishFactorioFixtureConfiguration(workflow, 'development-only-policy', 'policy', policy)
+  await assert.rejects(
+    workflow.propose({
+      proposalId: 'holdout-source-rejected',
+      sourceRunRefs: ['holdout-source'],
+      baselineRef: bundle.defaultBaselineRef,
+      policyRef,
+    }),
+    /not a certified development profile/,
+  )
+  assert.equal(invocations, 0)
+})
+
 test('P3 fixture assertion is human-scoped and does not grant auto-promotion', () => {
   const now = new Date('2030-01-01T00:00:00Z')
   const assertion = createFactorioFixtureAssertion({
@@ -344,7 +390,7 @@ test('P3 fixture E2E: recorded P1 → propose → two arms → request → human
       overlayRef: promoted.overlayRef,
     })
     assert.equal(nextRun.pins.harnessState?.overlayRef?.contentHash, promoted.overlayRef.contentHash)
-    assert.equal(bundle.rcs.exportSnapshot().baselines.length, 5)
+    assert.equal(bundle.rcs.exportSnapshot().baselines.length, 6)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -462,6 +508,15 @@ test('P3 projection is a bounded summary and rejects unfinished runs', () => {
   assert.equal(projection.outcomes[0]?.recentFeedback[0]?.error?.message?.length, 512)
   assert.match(projection.generationInstruction, /recentFeedback/)
   assert.match(projection.generationInstruction, /exactly one JSON object/)
+  assert.match(projection.generationInstruction, /AUTOMATIC-factory/)
+  assert.match(projection.generationInstruction, /nearest\(\)/)
+  assert.match(projection.generationInstruction, /player inventory/)
+  assert.match(projection.generationInstruction, /60s machine throughput/)
+  assert.match(projection.generationInstruction, /task-agnostic/)
+  assert.match(projection.generationInstruction, /source-run-specific factory layout/)
+  assert.match(projection.generationInstruction, /get_prototype_recipe/)
+  assert.match(projection.generationInstruction, /mine-to-furnace/)
+  assert.doesNotMatch(projection.generationInstruction, /reuses successful/)
   assert.equal('cells' in projection, false)
   assert.throws(
     () => projectFactorioGenerationInput(['missing'], { readLive: () => undefined }),
@@ -474,6 +529,81 @@ test('P3 projection is a bounded summary and rejects unfinished runs', () => {
     () => projectFactorioGenerationInput(['factorio-open'], { readLive: () => unfinished }),
     /not terminal/,
   )
+})
+
+test('generation projection keeps failing cell source and drops successful walkthroughs', () => {
+  const live = recordedLive('mixed-source', false, 'factorio.throughput/iron-ore/v1')
+  live.finalProjection.cells = [
+    {
+      ...live.finalProjection.cells[0]!,
+      cellId: 'mixed-source:cell:0',
+      status: 'success',
+      source: 'factorio.step("move_to(Position(17, 72))\\nplace_entity(Prototype.BurnerMiningDrill, position=Position(17, 72))")',
+      error: undefined,
+      factorioEffect: {
+        method: 'step',
+        episodeId: 'mixed-source:episode:0',
+        stepIndex: 1,
+        commandId: 'mixed-source:command:1',
+        observationRef: {
+          hash: 'sha256:obs', kind: 'fle.observation', schema: 'fle.observation/v1',
+          mediaType: 'application/json', bytes: 1, truncated: false,
+        },
+        outputStateRef: {
+          hash: 'sha256:state', kind: 'fle.game-state', schema: 'fle.game-state/v1',
+          mediaType: 'application/json', bytes: 1, truncated: false,
+        },
+        actionCapabilities: [],
+        observation: { rawText: 'nearest iron pos: Position(x=15.5, y=70.5)' },
+        reward: 0,
+        terminated: false,
+        truncated: false,
+        verification: { success: false, meta: [] },
+        metrics: { stepSeconds: 1, tick: 60, productionScore: 0, automatedProductionScore: 0, actionHadError: false },
+      },
+    },
+    {
+      ...live.finalProjection.cells[0]!,
+      cellId: 'mixed-source:cell:1',
+      status: 'error',
+      source: 'factorio.step("res = []\\nres.append(1)")',
+      error: { code: 'ACTION_CALL_NOT_ALLOWED', message: "method 'append' is not registered" },
+    },
+  ]
+  const projection = projectFactorioGenerationInput(['mixed-source'], {
+    readLive: () => live,
+    requireDevelopmentProfiles: true,
+  })
+  const feedback = projection.outcomes[0]?.recentFeedback ?? []
+  assert.equal(feedback.length, 2)
+  assert.equal(feedback[0]?.source, undefined)
+  assert.equal(feedback[0]?.observation, undefined)
+  assert.equal(feedback[1]?.source, 'factorio.step("res = []\\nres.append(1)")')
+  assert.match(feedback[1]?.error?.message ?? '', /append/)
+  const blob = JSON.stringify(projection)
+  assert.doesNotMatch(blob, /Position\(17, 72\)/)
+  assert.doesNotMatch(blob, /15\.5/)
+})
+
+test('official candidate generation accepts only certified development source profiles', () => {
+  const development = recordedLive('development-source', false, 'factorio.throughput/iron-plate/v1')
+  assert.doesNotThrow(() => projectFactorioGenerationInput(['development-source'], {
+    readLive: () => development,
+    requireDevelopmentProfiles: true,
+  }))
+
+  const holdout = recordedLive('holdout-source', false, 'factorio.throughput/advanced-circuit/v1')
+  assert.throws(() => projectFactorioGenerationInput(['holdout-source'], {
+    readLive: () => holdout,
+    requireDevelopmentProfiles: true,
+  }), /not a certified development profile/)
+
+  const forged = recordedLive('forged-development', false, 'factorio.throughput/iron-plate/v1')
+  forged.experimentProfile!.taskDigest = 'sha256:forged'
+  assert.throws(() => projectFactorioGenerationInput(['forged-development'], {
+    readLive: () => forged,
+    requireDevelopmentProfiles: true,
+  }), /development profile identity drifts/)
 })
 
 test('P3 recorded-live parser accepts FLE coordinates while rejecting malformed projection', () => {
@@ -549,15 +679,36 @@ test('official generate refuses to run without a published freeze', async () => 
   }
 })
 
-test('production host enables official freeze when experiment state root is set', () => {
+test('production host uses an isolated development root before an official freeze exists', () => {
   const previous = process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT']
   const root = mkdtempSync(path.join(tmpdir(), 'helix-factorio-official-host-'))
   process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT'] = root
   try {
-    assert.throws(() => createRefinementCommandHost(), /ENOENT|experiment freeze/)
+    const host = createRefinementCommandHost()
+    assert.ok(host.rcs)
   } finally {
     if (previous === undefined) delete process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT']
     else process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT'] = previous
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('official host promote without freeze is fail-closed', () => {
+  const bundle = createFactorioHostBundle()
+  const host = createFactorioRefinementCommandHost({
+    rcs: bundle.rcs,
+    generationModel: 'fixture-recorded-model',
+    requireOfficialFreeze: true,
+    innerPort: stubPort(JSON.stringify({
+      schemaVersion: 'helix.harness-overlay/v1',
+      baseBaselineRef: bundle.defaultBaselineRef,
+      changes: { taskNarrativeTemplate: 'x' },
+    })),
+    readLive: runId => recordedLive(runId, false),
+    runArm: ({ reservedRunRef }) => ({ runRef: reservedRunRef, quality: 0, cost: 1, latencyMs: 1, failed: true }),
+  })
+  assert.throws(
+    () => host.rcs.promoteCandidateWithArtifacts({ requestKey: 'req', candidateId: 'cand', artifacts: [] }),
+    /requires a published freeze/,
+  )
 })

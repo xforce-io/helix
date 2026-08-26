@@ -16,6 +16,7 @@ import {
   FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT,
   FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT,
   FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT,
+  FACTORIO_DEFAULT_P4_HARNESS_DOCUMENT,
 } from '../src/harness-document.js'
 import type {
   CellExecutionRecord,
@@ -68,6 +69,42 @@ test('P3 baseline forbids method-call probing inside FLE action programs', () =>
   assert.match(instruction, /dict\.get, list\.append, get_resource_field/)
   assert.equal(FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT.control.taskNarrativeTemplate,
     FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT.control.taskNarrativeTemplate)
+})
+
+test('P4 baseline leaves the concrete factory task to ContextEnvelope', () => {
+  const narrative = FACTORIO_DEFAULT_P4_HARNESS_DOCUMENT.control.taskNarrativeTemplate
+  const instruction = FACTORIO_DEFAULT_P4_HARNESS_DOCUMENT.control.systemInstructionTemplate
+  assert.match(narrative, /ContextEnvelope/)
+  assert.doesNotMatch(narrative, /iron-ore/)
+  assert.match(instruction, /within 10 tiles/)
+  assert.match(instruction, /player is idle/)
+})
+
+test('运行时任务覆盖不会与静态控制平面中的旧任务冲突', async () => {
+  const port = new FakePort([toolResponse('reset-call', 'factorio.reset()')])
+  const assembled = assembleTestRun()
+  await runHarness({
+    runId: 'advanced-circuit-run',
+    episodeId: 'advanced-circuit-run:episode:0',
+    pins: assembled.pins,
+    port,
+    budget: { deadlineAt: 10_000 },
+    control: { deadlineAt: 10_000 },
+    frozenHarness: assembled.frozen,
+    controlPlaneText: assembled.controlPlaneText,
+    controlPlaneContentHash: assembled.controlPlaneContentHash,
+    taskOverride: {
+      id: 'advanced_circuit_throughput',
+      instruction: 'Create an automatic advanced-circuit factory.',
+    },
+    execute: async input => record(input.code, input.cellId, 1, 'reset', true),
+  })
+
+  assert.equal(port.requests.length, 1)
+  assert.doesNotMatch(port.requests[0]!.system, /iron-ore/)
+  const requestText = JSON.stringify(port.requests[0])
+  assert.match(requestText, /advanced_circuit_throughput/)
+  assert.match(requestText, /automatic advanced-circuit factory/)
 })
 
 

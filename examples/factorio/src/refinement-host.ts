@@ -17,7 +17,10 @@ import {
   type EvaluationArmResult,
 } from '../../../src/refinement/milkie-adapter.js'
 import { signActorAssertion, type ActorAssertionV1, type RefinementTrustBundleV1 } from '../../../src/refinement/trust.js'
-import { validateFactorioOverlayProtocol } from './overlay-protocol-guard.js'
+import {
+  validateFactorioOverlayProtocol,
+  validateFactorioOverlayTaskAgnostic,
+} from './overlay-protocol-guard.js'
 import { admitGeneratedOverlayPayload } from '../../../src/refinement/overlay-admission.js'
 import {
   ARTIFACT_ROOT,
@@ -37,6 +40,7 @@ import {
   type FactorioExperimentFreeze,
   type SuiteProjectionCase,
 } from './experiment/freeze.js'
+import { assertOfficialPromotionPrecondition } from './experiment/evidence.js'
 import {
   assembleFactorioRunFromFrozenPins,
   createFactorioHostBundle,
@@ -46,7 +50,10 @@ import {
 } from './harness-host.js'
 import { runAssembledFactorioLive } from './live.js'
 import type { LiveEvidence } from './types.js'
-import { resolveFactorioExperimentCase } from './experiment/cases.js'
+import {
+  isDevelopmentInputRef,
+  resolveFactorioExperimentCase,
+} from './experiment/cases.js'
 
 export const FACTORIO_EXTRACTOR_DIGEST = createHash('sha256')
   .update('helix.factorio.extractor/v1')
@@ -94,11 +101,10 @@ export type FactorioGenerationProjection = {
     modelCallCount: number
     /** Bounded model-authored action/error feedback, never raw traces. */
     recentFeedback: Array<{
-      source: string
+      source?: string
       status: string
       error?: { code?: string; message?: string }
       verification?: boolean
-      observation?: string
     }>
     harnessContentHash?: string
   }>
@@ -156,7 +162,11 @@ export function extractGeneratedOverlayJson(text: string): string {
 
 export function projectFactorioGenerationInput(
   sourceRunRefs: string[],
-  options: { readLive?: (runId: string) => LiveEvidence | undefined } = {},
+  options: {
+    readLive?: (runId: string) => LiveEvidence | undefined
+    /** Formal candidates may only learn from certified development profiles. */
+    requireDevelopmentProfiles?: boolean
+  } = {},
 ): FactorioGenerationProjection {
   if (sourceRunRefs.length === 0) {
     throw new Error('projectFactorioGenerationInput requires recorded Factorio run refs')
@@ -179,13 +189,30 @@ export function projectFactorioGenerationInput(
     ) {
       throw new Error(`recorded Factorio run is not terminal: ${runId}`)
     }
+    if (options.requireDevelopmentProfiles) {
+      const profile = live.experimentProfile
+      if (profile === undefined || typeof profile.inputRef !== 'string' || !isDevelopmentInputRef(profile.inputRef)) {
+        throw new Error(`recorded Factorio run is not a certified development profile: ${runId}`)
+      }
+      const expected = resolveFactorioExperimentCase({ inputRef: profile.inputRef, slot: profile.slot })
+      if (
+        profile.taskId !== expected.taskId ||
+        profile.taskDigest !== expected.taskDigest ||
+        profile.category !== expected.category ||
+        profile.instruction !== expected.instruction ||
+        profile.seed !== expected.seed ||
+        profile.digest !== expected.digest
+      ) {
+        throw new Error(`recorded Factorio development profile identity drifts: ${runId}`)
+      }
+    }
     outcomes.push({
       runId,
       verificationSuccess: live.finalProjection.verification.success,
       termination: live.termination,
       modelCallCount: live.finalProjection.modelCallCount,
       recentFeedback: live.finalProjection.cells.slice(-2).map(cell => ({
-        source: (cell.source ?? '').slice(0, 4_000),
+        ...(cell.status === 'error' ? { source: (cell.source ?? '').slice(0, 4_000) } : {}),
         status: cell.status,
         ...(cell.error === undefined
           ? {}
@@ -199,10 +226,7 @@ export function projectFactorioGenerationInput(
             }),
         ...(cell.factorioEffect === undefined
           ? {}
-          : {
-              verification: cell.factorioEffect.verification.success,
-              observation: String(cell.factorioEffect.observation.rawText ?? '').slice(0, 1_024),
-            }),
+          : { verification: cell.factorioEffect.verification.success }),
       })),
       ...(live.pins.harnessState === undefined
         ? {}
@@ -215,7 +239,13 @@ export function projectFactorioGenerationInput(
       'The object must be a helix.harness-overlay/v1 HarnessOverlay whose baseBaselineRef exactly equals the proposal baselineRef.',
       'Its changes must contain exactly one non-empty taskNarrativeTemplate string and no other fields.',
       'Do not modify protocolRules, stopConditions, systemInstructionTemplate, catalogCards, policy, suite, source evidence, credentials, aliases, promotion requests, or add a second overlay.',
-      'Use the bounded recentFeedback to write a concrete, low-risk execution plan that reuses successful actions and avoids recorded errors; do not emit Python code.',
+      'Use the bounded recentFeedback errors to write a concrete AUTOMATIC-factory method. Do not copy successful cell source, placements, or fueling sequences.',
+      'FLE scores 60s machine throughput after the player is idle, not player inventory; never hand-craft the target item.',
+      'Query nearest() then move_to within 10 tiles before place_entity; do not hardcode one tile as the only legal placement.',
+      'The template must be task-agnostic: do not name a particular target product, recipe, throughput number, map coordinate, or source-run-specific factory layout.',
+      'Use the task and capability information returned by the current reset to choose resources, recipe steps, placements, and scale.',
+      'For transformed targets, discover the dependency chain with get_prototype_recipe and configure the appropriate assembling or converting machines; do not assume every task is a mine-to-furnace line.',
+      'Do not emit Python code.',
     ].join(' '),
     sourceRunRefs: [...sourceRunRefs],
     outcomes,
@@ -278,17 +308,31 @@ export function createRefinementCommandHost(): RefinementCommandHost {
   const explicit = process.env['HELIX_FACTORIO_HARNESS_STATE_ROOT']
   if (explicit !== undefined && explicit.trim() !== '') {
     const root = assertIsolatedExperimentStateRoot(explicit)
-    const freeze = parseFactorioExperimentFreeze(
-      fs.readFileSync(experimentFreezePath(root), 'utf8'),
-      EXAMPLE_BUNDLE,
-    )
+    const freezePath = experimentFreezePath(root)
+    if (fs.existsSync(freezePath)) {
+      const freeze = parseFactorioExperimentFreeze(
+        fs.readFileSync(freezePath, 'utf8'),
+        EXAMPLE_BUNDLE,
+      )
+      return createFactorioRefinementCommandHost({
+        rootDir: root,
+        requireOfficialFreeze: true,
+        requireDevelopmentProfiles: true,
+        officialFreeze: freeze,
+      })
+    }
+    // A dedicated development root is intentionally usable before a formal
+    // freeze exists. The candidate still accepts only development profiles;
+    // the presence of the signed freeze is the transition to formal mode.
     return createFactorioRefinementCommandHost({
       rootDir: root,
-      requireOfficialFreeze: true,
-      officialFreeze: freeze,
+      requireDevelopmentProfiles: true,
     })
   }
-  return createFactorioRefinementCommandHost({ rootDir: HARNESS_STATE_ROOT })
+  return createFactorioRefinementCommandHost({
+    rootDir: HARNESS_STATE_ROOT,
+    requireDevelopmentProfiles: true,
+  })
 }
 
 export type FactorioRunArm = (input: {
@@ -307,6 +351,8 @@ export function createFactorioRefinementCommandHost(options: {
   generationModel?: string
   runArm?: FactorioRunArm
   readLive?: (runId: string) => LiveEvidence | undefined
+  /** Require every generation source run to carry a certified development profile. */
+  requireDevelopmentProfiles?: boolean
   requireOfficialFreeze?: boolean
   officialFreeze?: FactorioExperimentFreeze
 } = {}): RefinementCommandHost {
@@ -314,8 +360,19 @@ export function createFactorioRefinementCommandHost(options: {
     ? createFactorioHostBundle(options.rootDir === undefined ? {} : { rootDir: options.rootDir })
     : undefined
   const rcs = options.rcs ?? bundle!.rcs
+  if (options.requireOfficialFreeze) {
+    const freeze = options.officialFreeze
+    const promote = rcs.promoteCandidateWithArtifacts.bind(rcs)
+    rcs.promoteCandidateWithArtifacts = input => {
+      if (freeze === undefined) throw new Error('official experiment promote requires a published freeze')
+      assertOfficialPromotionPrecondition({ freeze, candidateId: input.candidateId })
+      return promote(input)
+    }
+  }
+
   const baselines = rcs.exportSnapshot().baselines
-  const defaultPublished = baselines.find(entry => entry.ref.id === 'factorio.default-p3') ??
+  const defaultPublished = baselines.find(entry => entry.ref.id === 'factorio.default-p4') ??
+    baselines.find(entry => entry.ref.id === 'factorio.default-p3') ??
     baselines.find(entry => entry.ref.id === 'factorio.default-p2') ??
     baselines.find(entry => entry.ref.id === 'factorio.default-p1') ??
     baselines[0]
@@ -347,7 +404,12 @@ export function createFactorioRefinementCommandHost(options: {
     projectGenerationInput: (sourceRunRefs) => {
       const projection = projectFactorioGenerationInput(
         sourceRunRefs,
-        options.readLive === undefined ? {} : { readLive: options.readLive },
+        {
+          ...(options.readLive === undefined ? {} : { readLive: options.readLive }),
+          ...(options.requireDevelopmentProfiles || options.requireOfficialFreeze
+            ? { requireDevelopmentProfiles: true }
+            : {}),
+        },
       )
       if (options.requireOfficialFreeze) assertProjectionHasNoHoldout(projection)
       return projection
@@ -396,6 +458,10 @@ export function createFactorioRefinementCommandHost(options: {
         const protocolError = validateFactorioOverlayProtocol(admitted.overlay)
         if (protocolError !== undefined) {
           throw new Error(`Factorio protocol violation: ${protocolError}`)
+        }
+        const leakError = validateFactorioOverlayTaskAgnostic(admitted.overlay)
+        if (leakError !== undefined) {
+          throw new Error(`Factorio protocol violation: ${leakError}`)
         }
       } catch (error) {
         throw new Error(
