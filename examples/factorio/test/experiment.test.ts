@@ -4,13 +4,18 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import {
+  FACTORIO_DEVELOPMENT_TASKS,
   FACTORIO_EXPERIMENT_TASKS,
+  FACTORIO_OFFICIAL_HOLDOUT_TASKS,
   OFFICIAL_EXPERIMENT_INPUT_REFS,
+  assertExperimentTaskPartitions,
   resolveFactorioExperimentCase,
 } from '../src/experiment/cases.js'
-import { parseExperimentEvidenceIndex, writeExperimentAnalysis } from '../src/experiment/evidence.js'
+import { assertOfficialPromotionPrecondition, parseExperimentEvidenceIndex, writeExperimentAnalysis } from '../src/experiment/evidence.js'
 import {
+  OFFICIAL_FREEZE_ID,
   assertIsolatedExperimentStateRoot,
+  assertFreezeIntegrity,
   assertProjectionHasNoHoldout,
   assertSuiteProjectionMatchesMatrix,
   buildOfficialFreeze,
@@ -18,6 +23,7 @@ import {
   buildOfficialSuiteCases,
   classifyOfficialIndex,
   defaultDurableHarnessStateRoot,
+  sealFactorioExperimentFreeze,
   type CanonicalMatrixRow,
 } from '../src/experiment/freeze.js'
 import { analyzeFactorioExperiment } from '../src/experiment/statistics.js'
@@ -91,12 +97,22 @@ test('experiment case selects a real task and a configured FLE slot', () => {
 })
 
 test('experiment task catalog contains only FLE-verified official identities', () => {
-  assert.deepEqual(Object.keys(FACTORIO_EXPERIMENT_TASKS), [...OFFICIAL_EXPERIMENT_INPUT_REFS])
+  assert.equal(Object.keys(FACTORIO_EXPERIMENT_TASKS).length, 20)
+  assert.deepEqual(Object.keys(FACTORIO_OFFICIAL_HOLDOUT_TASKS), [...OFFICIAL_EXPERIMENT_INPUT_REFS])
+  assert.equal(Object.keys(FACTORIO_DEVELOPMENT_TASKS).length, 10)
   assert.equal(resolveFactorioExperimentCase({ inputRef: 'factorio.throughput/electronic-circuit/v1', seed: 0 }).taskId, 'electronic_circuit_throughput')
   assert.throws(
     () => resolveFactorioExperimentCase({ inputRef: 'factorio.throughput/processing-unit/v1', seed: 0 }),
     /not registered/,
   )
+  assert.doesNotThrow(assertExperimentTaskPartitions)
+  assert.equal(OFFICIAL_FREEZE_ID, 'success-rate-v2')
+  const developmentIdentities = new Set(Object.values(FACTORIO_DEVELOPMENT_TASKS)
+    .flatMap(task => [task.taskId, task.taskDigest]))
+  for (const task of Object.values(FACTORIO_OFFICIAL_HOLDOUT_TASKS)) {
+    assert.equal(developmentIdentities.has(task.taskId), false)
+    assert.equal(developmentIdentities.has(task.taskDigest), false)
+  }
 })
 
 test('official freeze is exactly 10 tasks by 4 slots by 4 repetitions', () => {
@@ -105,18 +121,31 @@ test('official freeze is exactly 10 tasks by 4 slots by 4 repetitions', () => {
   assert.equal(new Set(matrix.map(row => row.caseId)).size, 160)
   assert.equal(new Set(matrix.map(row => row.inputRef)).size, 10)
   assert.deepEqual(FREEZE.coverage, {
-    'raw-material': { variants: 8, pairs: 32 },
-    intermediate: { variants: 12, pairs: 48 },
+    intermediate: { variants: 8, pairs: 32 },
     circuit: { variants: 4, pairs: 16 },
-    science: { variants: 8, pairs: 32 },
+    science: { variants: 12, pairs: 48 },
     structure: { variants: 4, pairs: 16 },
-    oil: { variants: 4, pairs: 16 },
+    oil: { variants: 12, pairs: 48 },
   })
   assertSuiteProjectionMatchesMatrix(buildOfficialSuiteCases(), matrix)
   assert.equal(classifyOfficialIndex(matrix, FREEZE), 'official')
   assert.equal(classifyOfficialIndex(matrix.slice(0, 12), FREEZE), 'smoke')
   assert.throws(() => classifyOfficialIndex([{ ...matrix[0]!, taskDigest: 'sha256:forged' }], FREEZE), /drifts/)
   assert.throws(() => classifyOfficialIndex([{ ...matrix[0]!, caseId: 'unknown-slot-0-rep-0' }], FREEZE), /not in freeze matrix/)
+})
+
+test('a signed freeze cannot substitute a legacy id or development catalog', () => {
+  const legacyId = sealFactorioExperimentFreeze({
+    ...FREEZE,
+    freezeId: 'success-rate-v1',
+  })
+  assert.throws(() => assertFreezeIntegrity(legacyId), /current official declaration/)
+
+  const developmentCatalog = sealFactorioExperimentFreeze({
+    ...FREEZE,
+    catalog: { ...FACTORIO_DEVELOPMENT_TASKS },
+  })
+  assert.throws(() => assertFreezeIntegrity(developmentCatalog), /certified official holdout/)
 })
 
 test('analysis only accepts a significant 10pp paired improvement with replay', () => {
@@ -150,15 +179,15 @@ test('smoke index of a freeze subset cannot be an official promotion verdict', a
   const matrix = buildOfficialMatrix()
   const rows = [
     ...[0, 1, 2, 3].map(slot => matrix.find(row => row.slot === slot)!),
-    ...['raw-material', 'intermediate', 'circuit', 'science', 'structure', 'oil']
+    ...FREEZE.keyCategories
       .map(category => matrix.find(row => row.category === category)!),
   ].filter((row, index, all) => all.findIndex(item => item.caseId === row.caseId) === index)
-  assert.equal(new Set(rows.map(row => row.category)).size, 6)
+  assert.equal(new Set(rows.map(row => row.category)).size, FREEZE.keyCategories.length)
   assert.equal(new Set(rows.map(row => row.slot)).size, 4)
   const pairs = await Promise.all(rows.map(row => writePairFiles(temp, row, { success: true, cost: 10, latencyMs: 10 })))
   const index = parseExperimentEvidenceIndex(JSON.stringify({
     schemaVersion: 'helix.factorio.experiment-index/v1',
-    experimentId: 'success-rate-v1',
+    experimentId: FREEZE.freezeId,
     freezeId: FREEZE.freezeId,
     contentDigest: FREEZE.contentDigest,
     reportRef: 'evaluation-report:report@0#abc',
@@ -183,7 +212,7 @@ test('index that replaces a frozen task identity is rejected before analysis', a
   const pair = await writePairFiles(temp, row, { success: true, cost: 10, latencyMs: 10 })
   const index = parseExperimentEvidenceIndex(JSON.stringify({
     schemaVersion: 'helix.factorio.experiment-index/v1',
-    experimentId: 'success-rate-v1',
+    experimentId: FREEZE.freezeId,
     freezeId: FREEZE.freezeId,
     contentDigest: FREEZE.contentDigest,
     reportRef: 'report',
@@ -212,7 +241,7 @@ test('experiment evidence accepts a deterministically replayed failed arm', asyn
   await Promise.all([...livePaths.map(file => writeFile(file, live)), ...replayPaths.map(file => writeFile(file, replay))])
   const index = parseExperimentEvidenceIndex(JSON.stringify({
     schemaVersion: 'helix.factorio.experiment-index/v1',
-    experimentId: 'failed-replay-v1',
+    experimentId: FREEZE.freezeId,
     freezeId: FREEZE.freezeId,
     contentDigest: FREEZE.contentDigest,
     reportRef: 'report',
@@ -254,8 +283,69 @@ test('official experiment state root must be isolated from the durable default',
 
 test('generation projection cannot carry official holdout identity', () => {
   assert.throws(
-    () => assertProjectionHasNoHoldout({ recentFeedback: 'factorio.throughput/iron-ore/v1' }),
+    () => assertProjectionHasNoHoldout({ recentFeedback: 'factorio.throughput/advanced-circuit/v1' }),
     /inputRef/,
   )
   assert.doesNotThrow(() => assertProjectionHasNoHoldout({ recentFeedback: 'reuse successful mining cells' }))
+})
+
+test('official promotion requires a passed official analysis bound to the candidate', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'helix-factorio-promote-'))
+  const analysisPath = path.join(temp, 'analysis.json')
+  assert.throws(
+    () => assertOfficialPromotionPrecondition({ freeze: FREEZE, candidateId: 'cand-1', analysisPath }),
+    /readable official analysis/,
+  )
+  await writeFile(analysisPath, JSON.stringify({
+    schemaVersion: 'helix.factorio.experiment-analysis/v1',
+    experimentId: FREEZE.freezeId,
+    freezeId: FREEZE.freezeId,
+    contentDigest: FREEZE.contentDigest,
+    mode: 'smoke',
+    candidateRef: 'candidate:cand-1@0#abc',
+    overlayRef: 'overlay:o@0#def',
+    analysis: { verdict: 'indeterminate' },
+  }))
+  assert.throws(
+    () => assertOfficialPromotionPrecondition({ freeze: FREEZE, candidateId: 'cand-1', analysisPath }),
+    /passed official 160-pair analysis/,
+  )
+  await writeFile(analysisPath, JSON.stringify({
+    schemaVersion: 'helix.factorio.experiment-analysis/v1',
+    experimentId: 'other-experiment',
+    freezeId: FREEZE.freezeId,
+    contentDigest: FREEZE.contentDigest,
+    mode: 'official',
+    candidateRef: 'candidate:cand-1@0#abc',
+    overlayRef: 'overlay:o@0#def',
+    analysis: { verdict: 'passed' },
+  }))
+  assert.throws(
+    () => assertOfficialPromotionPrecondition({ freeze: FREEZE, candidateId: 'cand-1', analysisPath }),
+    /does not match the published freeze/,
+  )
+  await writeFile(analysisPath, JSON.stringify({
+    schemaVersion: 'helix.factorio.experiment-analysis/v1',
+    experimentId: FREEZE.freezeId,
+    freezeId: FREEZE.freezeId,
+    contentDigest: FREEZE.contentDigest,
+    mode: 'official',
+    candidateRef: 'candidate:cand-1@0#abc',
+    overlayRef: 'overlay:o@0#def',
+    analysis: { verdict: 'passed' },
+  }))
+  assert.doesNotThrow(() => assertOfficialPromotionPrecondition({ freeze: FREEZE, candidateId: 'cand-1', analysisPath }))
+  assert.throws(
+    () => assertOfficialPromotionPrecondition({ freeze: FREEZE, candidateId: 'cand-1-approved', analysisPath }),
+    /candidate does not match/,
+  )
+  assert.throws(
+    () => assertOfficialPromotionPrecondition({ freeze: FREEZE, candidateId: 'other', analysisPath }),
+    /candidate does not match/,
+  )
+  const tampered = { ...FREEZE, contentDigest: 'sha256:forged' }
+  assert.throws(
+    () => assertOfficialPromotionPrecondition({ freeze: tampered, candidateId: 'cand-1', analysisPath }),
+    /contentDigest|untrusted|freeze/,
+  )
 })

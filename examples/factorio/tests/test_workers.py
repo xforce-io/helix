@@ -30,16 +30,16 @@ class ActionPolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "EXPERIMENT_PROFILE_INVALID"):
             bridge.experiment_task_and_slot({"experimentProfile": {**profile, "taskDigest": "sha256:forged"}})
 
-    def test_official_electronic_circuit_is_registered(self) -> None:
+    def test_v2_official_advanced_circuit_is_registered(self) -> None:
         profile = {
-            "inputRef": "factorio.throughput/electronic-circuit/v1",
-            "taskId": "electronic_circuit_throughput",
-            "taskDigest": "sha256:8545de22fd179a544f28758dddb35561d9f1f0d8daff72a103421c75df44fb9e",
+            "inputRef": "factorio.throughput/advanced-circuit/v1",
+            "taskId": "advanced_circuit_throughput",
+            "taskDigest": "sha256:2618f0e412d6f3d1d9202a401a9a8a56b8866a571403858c37a77abafd09e050",
             "slot": 1,
             "seed": 1,
             "digest": "sha256:test",
         }
-        self.assertEqual(bridge.experiment_task_and_slot({"experimentProfile": profile}), ("electronic_circuit_throughput", 1))
+        self.assertEqual(bridge.experiment_task_and_slot({"experimentProfile": profile}), ("advanced_circuit_throughput", 1))
 
     def test_official_slot_must_be_configured_pool(self) -> None:
         profile = {

@@ -35,6 +35,7 @@ import {
   FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT,
   FACTORIO_DEFAULT_P2_HARNESS_DOCUMENT,
   FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT,
+  FACTORIO_DEFAULT_P4_HARNESS_DOCUMENT,
   FACTORIO_V4_HARNESS_DOCUMENT,
   FACTORIO_V5_HARNESS_DOCUMENT,
   createFactorioScenarioAdapter,
@@ -95,14 +96,20 @@ export function createFactorioHostBundle(
   const rcs = new RefinementControlStore(rootDir === undefined ? {} : { rootDir })
   if (rootDir !== undefined) importLegacyHarnessStoreIfPresent(rcs, rootDir)
   const store = rcsHarnessView(rcs)
-  // Keep P1 materialized for recorded selections and old candidates. New live
-  // runs use P2, whose contract clarification is an immutable new baseline.
+  // Keep P1–P3 materialized for recorded selections and old candidates. New
+  // live runs use P4, whose static control plane is task-agnostic so the
+  // ContextEnvelope can select each experiment task without contradiction.
   publishBaselineIfAbsent(store, {
     id: 'factorio.default-p1',
     revision: 1,
     document: FACTORIO_DEFAULT_P1_HARNESS_DOCUMENT,
   })
   const defaultBaselineRef = publishBaselineIfAbsent(store, {
+    id: 'factorio.default-p4',
+    revision: 1,
+    document: FACTORIO_DEFAULT_P4_HARNESS_DOCUMENT,
+  })
+  publishBaselineIfAbsent(store, {
     id: 'factorio.default-p3',
     revision: 1,
     document: FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT,
@@ -300,10 +307,11 @@ export function assembleFactorioRun(input: {
   basePins: RunPins
   baselineRef: HarnessStateRef
   overlayRef?: HarnessStateRef
+  admission?: 'external' | 'evaluator'
 }): AssembledFactorioRun {
   const codeProtocolPin = input.basePins.harness
   const availableCatalogRefs = formFactorioAvailableCatalogRefs(codeProtocolPin)
-  if (input.overlayRef !== undefined) {
+  if (input.overlayRef !== undefined && input.admission !== 'evaluator') {
     input.bundle.rcs.select('external', {
       baselineRef: input.baselineRef,
       overlayRef: input.overlayRef,

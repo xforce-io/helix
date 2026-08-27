@@ -7,8 +7,9 @@ import { signConfiguration, type RefinementTrustBundleV1 } from '../../../../src
 import { canonicalJson, digest } from '../canonical.js'
 import { ARTIFACT_ROOT } from '../cli-common.js'
 import {
-  FACTORIO_EXPERIMENT_TASKS,
+  FACTORIO_OFFICIAL_HOLDOUT_TASKS,
   OFFICIAL_EXPERIMENT_INPUT_REFS,
+  assertExperimentTaskPartitions,
   type FactorioExperimentTask,
 } from './cases.js'
 import {
@@ -16,12 +17,13 @@ import {
   type ExperimentThresholds,
 } from './statistics.js'
 
-export const OFFICIAL_FREEZE_ID = 'success-rate-v1'
+/** The historical v1 freeze remains immutable evidence; new holdout is v2. */
+export const OFFICIAL_FREEZE_ID = 'success-rate-v2'
 export const OFFICIAL_FREEZE_SCHEMA = 'helix.factorio.experiment-freeze/v1' as const
 export const OFFICIAL_SLOT_COUNT = 4
 export const OFFICIAL_REPETITIONS = 4
 export const OFFICIAL_KEY_CATEGORIES = [
-  'raw-material', 'intermediate', 'circuit', 'science', 'structure', 'oil',
+  'intermediate', 'circuit', 'science', 'structure', 'oil',
 ] as const
 export const EXPERIMENT_FREEZE_FILENAME = 'experiment-freeze.json'
 export const OFFICIAL_FREEZE_PUBLISHER = {
@@ -135,7 +137,7 @@ export function officialCaseId(inputRef: string, slot: number, repetitionIndex: 
 export function buildOfficialMatrix(): CanonicalMatrixRow[] {
   const rows: CanonicalMatrixRow[] = []
   for (const inputRef of OFFICIAL_EXPERIMENT_INPUT_REFS) {
-    const task = FACTORIO_EXPERIMENT_TASKS[inputRef]!
+    const task = FACTORIO_OFFICIAL_HOLDOUT_TASKS[inputRef]!
     for (let slot = 0; slot < OFFICIAL_SLOT_COUNT; slot += 1) {
       for (let repetitionIndex = 0; repetitionIndex < OFFICIAL_REPETITIONS; repetitionIndex += 1) {
         rows.push({
@@ -257,7 +259,8 @@ export function buildOfficialFreeze(input: {
   policyId: string
   policyDigest: string
 }): FactorioExperimentFreeze {
-  if (Object.keys(FACTORIO_EXPERIMENT_TASKS).length !== OFFICIAL_EXPERIMENT_INPUT_REFS.length) {
+  assertExperimentTaskPartitions()
+  if (Object.keys(FACTORIO_OFFICIAL_HOLDOUT_TASKS).length !== OFFICIAL_EXPERIMENT_INPUT_REFS.length) {
     throw new Error('official freeze requires exactly the certified 10-task catalog')
   }
   return sealFactorioExperimentFreeze({
@@ -267,7 +270,7 @@ export function buildOfficialFreeze(input: {
     suiteDigest: input.suiteDigest,
     policyId: input.policyId,
     policyDigest: input.policyDigest,
-    catalog: { ...FACTORIO_EXPERIMENT_TASKS },
+    catalog: { ...FACTORIO_OFFICIAL_HOLDOUT_TASKS },
     matrix: buildOfficialMatrix(),
     keyCategories: [...OFFICIAL_KEY_CATEGORIES],
     coverage: officialCoverage(),
@@ -310,6 +313,17 @@ function assertMatrixMatchesCatalog(freeze: FactorioExperimentFreeze): void {
   }
 }
 
+/** A signed snapshot is valid only for the declared next holdout, not any catalog. */
+function assertCatalogMatchesOfficialHoldout(freeze: FactorioExperimentFreeze): void {
+  assertExperimentTaskPartitions()
+  if (freeze.freezeId !== OFFICIAL_FREEZE_ID) {
+    throw new Error(`freeze id must equal the current official declaration: ${OFFICIAL_FREEZE_ID}`)
+  }
+  if (canonicalJson(freeze.catalog) !== canonicalJson(FACTORIO_OFFICIAL_HOLDOUT_TASKS)) {
+    throw new Error('freeze catalog does not match the certified official holdout')
+  }
+}
+
 export function assertFreezeIntegrity(
   freeze: FactorioExperimentFreeze,
   bundle?: RefinementTrustBundleV1,
@@ -336,6 +350,7 @@ export function assertFreezeIntegrity(
   if (signConfiguration({ ...body, contentDigest: freeze.contentDigest }, resolvePublisherSecret(trusted, freeze)) !== freeze.signature) {
     throw new Error('freeze publisher signature is untrusted')
   }
+  assertCatalogMatchesOfficialHoldout(freeze)
   assertMatrixMatchesCatalog(freeze)
 }
 
@@ -400,13 +415,13 @@ export function classifyOfficialIndex(
 
 export function assertProjectionHasNoHoldout(value: unknown): void {
   const text = JSON.stringify(value)
-  for (const task of Object.values(FACTORIO_EXPERIMENT_TASKS)) {
+  for (const task of Object.values(FACTORIO_OFFICIAL_HOLDOUT_TASKS)) {
     if (text.includes(task.instruction)) {
       throw new Error('generation projection must not contain holdout task instruction')
     }
   }
-  if (text.includes('factorio.throughput/')) {
-    throw new Error('generation projection must not contain official holdout inputRef')
+  for (const inputRef of OFFICIAL_EXPERIMENT_INPUT_REFS) {
+    if (text.includes(inputRef)) throw new Error('generation projection must not contain official holdout inputRef')
   }
 }
 

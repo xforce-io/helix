@@ -18,6 +18,7 @@ from fle.env.gym_env.action import Action
 PROTOCOL_VERSION = "2"
 TASK_ID = "iron_ore_throughput"
 EXPERIMENT_TASKS = {
+    # Development-only identities. They may be used as generation sources.
     "factorio.throughput/iron-ore/v1": {
         "taskId": "iron_ore_throughput",
         "taskDigest": "sha256:c50497c8548123494e48376e51ace2dd4f66717421de3a9f930d5833b6572f44",
@@ -57,6 +58,48 @@ EXPERIMENT_TASKS = {
     "factorio.throughput/plastic-bar/v1": {
         "taskId": "plastic_bar_throughput",
         "taskDigest": "sha256:5c5d8c8c8f2e23d117a8ce3edad12d00f0f55ddb3eff6ef5ddf5ce4d36edfef0",
+    },
+    # Certified v2 formal holdout identities. Keep this bridge registry in
+    # exact agreement with experiment/cases.ts; reset rejects unknown profiles.
+    "factorio.throughput/advanced-circuit/v1": {
+        "taskId": "advanced_circuit_throughput",
+        "taskDigest": "sha256:2618f0e412d6f3d1d9202a401a9a8a56b8866a571403858c37a77abafd09e050",
+    },
+    "factorio.throughput/battery/v1": {
+        "taskId": "battery_throughput",
+        "taskDigest": "sha256:1b033e1ae66db942640c4443c39a293b60dedcf557d350e8df25f7fd58564a93",
+    },
+    "factorio.throughput/chemical-science-pack/v1": {
+        "taskId": "chemical_science_pack_throughput",
+        "taskDigest": "sha256:4448997a9c2d1fbf7027dbf4565244ff8705e7448f2ad24ff3a29956c15f9bee",
+    },
+    "factorio.throughput/engine-unit/v1": {
+        "taskId": "engine_unit_throughput",
+        "taskDigest": "sha256:35408892bda2c372748a2abcae734b860b692acd7f42fe4892ad9353333d36c0",
+    },
+    "factorio.throughput/military-science-pack/v1": {
+        "taskId": "military_science_pack_throughput",
+        "taskDigest": "sha256:451e82c157c42783f4cfaefbadc785490aca6aef5c0feccb0930171c54184197",
+    },
+    "factorio.throughput/petroleum-gas/v1": {
+        "taskId": "petroleum_gas_throughput",
+        "taskDigest": "sha256:4e408447ccd4fdac9ef0ab831302a468fc0bb4546af98edcd4cf9ad20cfa0ec9",
+    },
+    "factorio.throughput/piercing-round/v1": {
+        "taskId": "piercing_round_throughput",
+        "taskDigest": "sha256:4cb0983072bf5f425ef68f27b61453938f79b0925d13a5c4fc56441a08c7b87c",
+    },
+    "factorio.throughput/sulfur/v1": {
+        "taskId": "sulfur_throughput",
+        "taskDigest": "sha256:1ae95ed7f47818c42aaa686738d6ea03b41aad12d9c40a001ec4d6cabdcfc420",
+    },
+    "factorio.throughput/low-density-structure/v1": {
+        "taskId": "low_density_structure_throughput",
+        "taskDigest": "sha256:23709dc8ddcd645fc1830433a8c076abf5309ab56126cc02e7351c84cdb5b496",
+    },
+    "factorio.throughput/production-science-pack/v1": {
+        "taskId": "production_science_pack_throughput",
+        "taskDigest": "sha256:c8d258169fffc26b0dd285822a8ccb93d816b9abcbac7aadfe993e5b1966bd29",
     },
 }
 MAX_ACTION_CHARS = 10_000

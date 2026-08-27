@@ -166,6 +166,36 @@ Action-program hard boundary:
   },
 }
 
+/**
+ * P4 is the first baseline intended for a catalog of runtime-selected tasks.
+ * The concrete objective is supplied only by ContextEnvelope.task on each
+ * turn. Keeping the static control plane task-agnostic prevents it from
+ * contradicting a holdout task selected by an experiment profile.
+ */
+export const FACTORIO_DEFAULT_P4_HARNESS_DOCUMENT: HarnessDocument = {
+  schemaVersion: 'helix.harness/v1',
+  control: {
+    systemInstructionTemplate: `${FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT.control.systemInstructionTemplate}
+
+Placement and scoring invariants:
+- Query nearest() then move_to within 10 tiles before place_entity; a target farther than 10 tiles from the player is illegal.
+- FLE scores 60s machine throughput after the player is idle. Player inventory is not success; never hand-craft the target item.`,
+    taskNarrativeTemplate:
+      'Treat the task id and instruction in the current ContextEnvelope as the sole factory objective. The static scenario text describes the FLE interface only and never overrides that runtime task.',
+    protocolRules: [...FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT.control.protocolRules],
+    termination: {
+      successSource: 'scenario-verifier',
+      stopConditions: [
+        ...FACTORIO_DEFAULT_P3_HARNESS_DOCUMENT.control.termination.stopConditions,
+      ],
+    },
+  },
+  catalogCards: [{ id: 'helix.models', version: '1.0.0' }],
+  compatibility: {
+    codeProtocolPins: ['factorio-rlm/v4'],
+  },
+}
+
 export const FACTORIO_TASK_NARRATIVE =
   'Create an automatic iron-ore factory that produces at least 16 iron-ore per 60 in-game seconds.'
 
@@ -173,18 +203,29 @@ export const FACTORIO_ENVIRONMENT_NARRATIVE = `Factorio Learning Environment (FL
 Persistent IPython kernel with factorio.reset()/factorio.step(program) bindings.
 Environment verifier owns task_verification.success.`
 
+export const FACTORIO_DYNAMIC_ENVIRONMENT_NARRATIVE = `Factorio Learning Environment (FLE).
+Persistent IPython kernel with factorio.reset()/factorio.step(program) bindings.
+The concrete factory task is supplied by ContextEnvelope.task on every model turn.
+Environment verifier owns task_verification.success.`
+
 export function createFactorioScenarioAdapter(): ExampleScenarioAdapter {
   return {
-    scenarioId: 'factorio.iron_ore_throughput',
-    buildScenarioPayload: () => ({
-      taskNarrative: FACTORIO_TASK_NARRATIVE,
-      environmentNarrative: FACTORIO_ENVIRONMENT_NARRATIVE,
-      extraSections: [
-        {
-          title: 'Scenario acceptance',
-          body: 'task_verification.success=true as decided by the FLE verifier.',
-        },
-      ],
-    }),
+    scenarioId: 'factorio.runtime-selected-task',
+    buildScenarioPayload: ({ frozen }) => {
+      const dynamicTask =
+        frozen.selection.baselineRef.id === 'factorio.default-p4'
+      return {
+        ...(dynamicTask ? {} : { taskNarrative: FACTORIO_TASK_NARRATIVE }),
+        environmentNarrative: dynamicTask
+          ? FACTORIO_DYNAMIC_ENVIRONMENT_NARRATIVE
+          : FACTORIO_ENVIRONMENT_NARRATIVE,
+        extraSections: [
+          {
+            title: 'Scenario acceptance',
+            body: 'task_verification.success=true as decided by the FLE verifier.',
+          },
+        ],
+      }
+    },
   }
 }

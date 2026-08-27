@@ -1,6 +1,6 @@
 /** Immutable, Factorio-only experiment evidence index and analysis writer. */
 
-import { promises as fs } from 'node:fs'
+import { promises as fs, readFileSync } from 'node:fs'
 import path from 'node:path'
 
 import { canonicalJson, digest } from '../canonical.js'
@@ -290,6 +290,9 @@ export async function writeExperimentAnalysis(input: {
   if (input.index.freezeId !== input.freeze.freezeId || input.index.contentDigest !== input.freeze.contentDigest) {
     throw new Error('experiment index freeze identity does not match freeze')
   }
+  if (input.index.experimentId !== input.freeze.freezeId) {
+    throw new Error('official experimentId must equal the freeze id')
+  }
   assertFreezeIntegrity(input.freeze)
   const mode = classifyOfficialIndex(input.index.pairs, input.freeze)
   await Promise.all(input.index.pairs.map(pair => verifyPairEvidence(pair, input.index.freezeId, input.index.contentDigest)))
@@ -318,4 +321,45 @@ export async function writeExperimentAnalysis(input: {
   await fs.mkdir(path.dirname(output), { recursive: true })
   await fs.writeFile(output, `${canonicalJson(artifact)}\n`, 'utf8')
   return { artifact, path: output }
+}
+
+export function officialAnalysisPath(experimentId: string, root?: string): string {
+  return path.join(path.resolve(root ?? path.join(ARTIFACT_ROOT, 'experiments')), experimentId, 'analysis.json')
+}
+
+export function assertOfficialPromotionPrecondition(input: {
+  freeze: FactorioExperimentFreeze
+  candidateId: string
+  overlayRef?: { id: string; contentHash: string }
+  analysisPath?: string
+}): void {
+  assertFreezeIntegrity(input.freeze)
+  const analysisPath = input.analysisPath ?? officialAnalysisPath(input.freeze.freezeId)
+  let artifact: ExperimentAnalysisArtifact
+  try {
+    artifact = JSON.parse(readFileSync(analysisPath, 'utf8')) as ExperimentAnalysisArtifact
+  } catch (error) {
+    throw new Error(`official promotion requires a readable official analysis: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (
+    artifact.schemaVersion !== 'helix.factorio.experiment-analysis/v1' ||
+    artifact.experimentId !== input.freeze.freezeId ||
+    artifact.freezeId !== input.freeze.freezeId ||
+    artifact.contentDigest !== input.freeze.contentDigest
+  ) {
+    throw new Error('official promotion analysis does not match the published freeze')
+  }
+  if (artifact.mode !== 'official' || artifact.analysis.verdict !== 'passed') {
+    throw new Error('official promotion requires a passed official 160-pair analysis')
+  }
+  const matched = /^candidate:([^@]+)@/.exec(artifact.candidateRef)
+  if (matched?.[1] !== input.candidateId) {
+    throw new Error('official promotion candidate does not match the passed analysis')
+  }
+  if (input.overlayRef !== undefined) {
+    const overlay = /^overlay:([^@]+)@0#([0-9a-f]+)$/.exec(artifact.overlayRef)
+    if (overlay?.[1] !== input.overlayRef.id || overlay[2] !== input.overlayRef.contentHash) {
+      throw new Error('official promotion overlay does not match the passed analysis')
+    }
+  }
 }

@@ -23,7 +23,8 @@ function task(taskId: string, category: string, taskDigest: string): FactorioExp
  * fingerprinted in the pinned FLE 0.4.3 environment.  Listing a task here is
  * an identity contract, not a best-effort Gym discovery result.
  */
-export const FACTORIO_EXPERIMENT_TASKS: Record<string, FactorioExperimentTask> = {
+/** Historical 160-pair identities are development-only after the #29 L2 revision. */
+export const FACTORIO_DEVELOPMENT_TASKS: Record<string, FactorioExperimentTask> = {
   'factorio.throughput/iron-ore/v1': task(
     'iron_ore_throughput', 'raw-material',
     'sha256:c50497c8548123494e48376e51ace2dd4f66717421de3a9f930d5833b6572f44',
@@ -65,7 +66,41 @@ export const FACTORIO_EXPERIMENT_TASKS: Record<string, FactorioExperimentTask> =
     'sha256:5c5d8c8c8f2e23d117a8ce3edad12d00f0f55ddb3eff6ef5ddf5ce4d36edfef0',
   ),
 }
+
+/** Fresh, independently fingerprinted profiles reserved for the next official freeze. */
+export const FACTORIO_OFFICIAL_HOLDOUT_TASKS: Record<string, FactorioExperimentTask> = {
+  'factorio.throughput/advanced-circuit/v1': task('advanced_circuit_throughput', 'circuit', 'sha256:2618f0e412d6f3d1d9202a401a9a8a56b8866a571403858c37a77abafd09e050'),
+  'factorio.throughput/battery/v1': task('battery_throughput', 'oil', 'sha256:1b033e1ae66db942640c4443c39a293b60dedcf557d350e8df25f7fd58564a93'),
+  'factorio.throughput/chemical-science-pack/v1': task('chemical_science_pack_throughput', 'science', 'sha256:4448997a9c2d1fbf7027dbf4565244ff8705e7448f2ad24ff3a29956c15f9bee'),
+  'factorio.throughput/engine-unit/v1': task('engine_unit_throughput', 'intermediate', 'sha256:35408892bda2c372748a2abcae734b860b692acd7f42fe4892ad9353333d36c0'),
+  'factorio.throughput/military-science-pack/v1': task('military_science_pack_throughput', 'science', 'sha256:451e82c157c42783f4cfaefbadc785490aca6aef5c0feccb0930171c54184197'),
+  'factorio.throughput/petroleum-gas/v1': task('petroleum_gas_throughput', 'oil', 'sha256:4e408447ccd4fdac9ef0ab831302a468fc0bb4546af98edcd4cf9ad20cfa0ec9'),
+  'factorio.throughput/piercing-round/v1': task('piercing_round_throughput', 'intermediate', 'sha256:4cb0983072bf5f425ef68f27b61453938f79b0925d13a5c4fc56441a08c7b87c'),
+  'factorio.throughput/sulfur/v1': task('sulfur_throughput', 'oil', 'sha256:1ae95ed7f47818c42aaa686738d6ea03b41aad12d9c40a001ec4d6cabdcfc420'),
+  'factorio.throughput/low-density-structure/v1': task('low_density_structure_throughput', 'structure', 'sha256:23709dc8ddcd645fc1830433a8c076abf5309ab56126cc02e7351c84cdb5b496'),
+  'factorio.throughput/production-science-pack/v1': task('production_science_pack_throughput', 'science', 'sha256:c8d258169fffc26b0dd285822a8ccb93d816b9abcbac7aadfe993e5b1966bd29'),
+}
+
+/** Resolver catalog; only the two named partitions may enter an experiment. */
+export const FACTORIO_EXPERIMENT_TASKS: Record<string, FactorioExperimentTask> = {
+  ...FACTORIO_DEVELOPMENT_TASKS,
+  ...FACTORIO_OFFICIAL_HOLDOUT_TASKS,
+}
+
 export const OFFICIAL_EXPERIMENT_INPUT_REFS = [
+  'factorio.throughput/advanced-circuit/v1',
+  'factorio.throughput/battery/v1',
+  'factorio.throughput/chemical-science-pack/v1',
+  'factorio.throughput/engine-unit/v1',
+  'factorio.throughput/military-science-pack/v1',
+  'factorio.throughput/petroleum-gas/v1',
+  'factorio.throughput/piercing-round/v1',
+  'factorio.throughput/sulfur/v1',
+  'factorio.throughput/low-density-structure/v1',
+  'factorio.throughput/production-science-pack/v1',
+] as const
+
+export const DEVELOPMENT_EXPERIMENT_INPUT_REFS = [
   'factorio.throughput/iron-ore/v1',
   'factorio.throughput/iron-plate/v1',
   'factorio.throughput/steel-plate/v1',
@@ -77,6 +112,33 @@ export const OFFICIAL_EXPERIMENT_INPUT_REFS = [
   'factorio.throughput/stone-wall/v1',
   'factorio.throughput/plastic-bar/v1',
 ] as const
+
+export function isDevelopmentInputRef(inputRef: string): boolean {
+  return FACTORIO_DEVELOPMENT_TASKS[inputRef] !== undefined
+}
+
+/**
+ * Development evidence and formal holdout must be independently identifiable.
+ * Checking all three identity dimensions prevents a renamed profile from
+ * silently reusing an already-observed task.
+ */
+export function assertExperimentTaskPartitions(): void {
+  const development = Object.entries(FACTORIO_DEVELOPMENT_TASKS)
+  const holdout = Object.entries(FACTORIO_OFFICIAL_HOLDOUT_TASKS)
+  for (const [developmentRef, developmentTask] of development) {
+    for (const [holdoutRef, holdoutTask] of holdout) {
+      if (developmentRef === holdoutRef) {
+        throw new Error(`Factorio development and holdout inputRef overlap: ${developmentRef}`)
+      }
+      if (developmentTask.taskId === holdoutTask.taskId) {
+        throw new Error(`Factorio development and holdout taskId overlap: ${developmentTask.taskId}`)
+      }
+      if (developmentTask.taskDigest === holdoutTask.taskDigest) {
+        throw new Error(`Factorio development and holdout taskDigest overlap: ${developmentTask.taskDigest}`)
+      }
+    }
+  }
+}
 
 export const DEFAULT_FACTORIO_EXPERIMENT_TASK =
   FACTORIO_EXPERIMENT_TASKS['factorio.throughput/iron-ore/v1']!
