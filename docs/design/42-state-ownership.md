@@ -1,8 +1,8 @@
 # 【architecture】Helix 与 milkie 状态职责边界
 
 - Issue: #42
-- 状态: Draft
-- 最后更新: 2026-09-01
+- 状态: Approved
+- 最后更新: 2026-09-02
 
 ## 1. 背景
 
